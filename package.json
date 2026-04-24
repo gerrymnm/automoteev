@@ -1,0 +1,22 @@
+{
+  "name": "automoteev",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone AI vehicle ownership agent for existing vehicle owners and lease holders.",
+  "workspaces": [
+    "apps/web",
+    "apps/api"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @automoteev/api",
+    "dev:web": "npm run dev --workspace @automoteev/web",
+    "dev:api": "npm run dev --workspace @automoteev/api",
+    "build": "npm run build --workspace @automoteev/api && npm run build --workspace @automoteev/web",
+    "typecheck": "npm run typecheck --workspace @automoteev/api && npm run typecheck --workspace @automoteev/web",
+    "lint": "npm run lint --workspace @automoteev/web",
+    "start": "npm run start --workspace @automoteev/api"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

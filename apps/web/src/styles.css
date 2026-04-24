@@ -1,0 +1,184 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f6f7f4;
+  color: #18201b;
+  line-height: 1.5;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+button, input, select, textarea { font: inherit; }
+button { border: 0; cursor: pointer; }
+
+.app-shell {
+  width: min(1180px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 32px 0;
+}
+
+.topbar, .status-head, .button-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.brand {
+  font-weight: 800;
+  font-size: 24px;
+  letter-spacing: 0;
+}
+
+.tabs {
+  display: flex;
+  gap: 8px;
+  background: #e8ebe4;
+  padding: 4px;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.tabs button, .ghost, .secondary {
+  color: #334039;
+  background: transparent;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.tabs .active, .secondary {
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgb(23 33 27 / 8%);
+}
+
+.primary {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  background: #176b5d;
+  color: white;
+  border-radius: 6px;
+  padding: 12px 16px;
+  font-weight: 700;
+}
+
+.panel, .status-hero, .side-panel {
+  background: #ffffff;
+  border: 1px solid #dce2d8;
+  border-radius: 8px;
+  padding: 24px;
+  box-shadow: 0 18px 48px rgb(30 45 38 / 8%);
+}
+
+.narrow { max-width: 520px; margin: 80px auto; }
+.auth-grid, .status-layout, .settings-grid {
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 24px;
+  align-items: start;
+}
+
+.intro {
+  min-height: 520px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+h1 { font-size: clamp(32px, 5vw, 62px); line-height: 1.02; margin: 12px 0; letter-spacing: 0; }
+h2 { margin-top: 0; font-size: 20px; }
+p { color: #4d5a53; }
+.muted, .small { color: #67746b; }
+.small { font-size: 13px; }
+
+label {
+  display: grid;
+  gap: 7px;
+  color: #445149;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+input, select, textarea {
+  width: 100%;
+  border: 1px solid #ccd5c8;
+  border-radius: 6px;
+  padding: 12px;
+  background: #fbfcfa;
+  color: #18201b;
+}
+
+textarea { min-height: 110px; resize: vertical; }
+.auth-card, .command-panel, .onboarding, .task-page, .outreach-panel { display: grid; gap: 16px; }
+.form-grid, .metric-grid, .task-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.task-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; }
+.provider-form {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.status-layout { grid-template-columns: minmax(0, 1fr) 340px; margin-top: 28px; }
+.status-hero { min-height: 420px; }
+.status-hero.action_needed { border-color: #d48166; }
+.status-hero.action_recommended { border-color: #d5a84f; }
+.status-hero.all_good { border-color: #78b592; }
+
+.status-pill, .status-chip, .trust-row, .privacy-note, .thin-status, .notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-pill {
+  padding: 10px 12px;
+  border-radius: 999px;
+  background: #eef2ea;
+  font-weight: 800;
+}
+
+.metric {
+  min-height: 104px;
+  border: 1px solid #e2e6df;
+  border-radius: 8px;
+  padding: 16px;
+  display: grid;
+  align-content: space-between;
+}
+
+.metric span { color: #637067; font-size: 13px; }
+.metric strong { font-size: 24px; overflow-wrap: anywhere; }
+
+.side-panel, .task-card, .action-box { display: grid; gap: 12px; }
+.action-box, .task-card {
+  border: 1px solid #e1e6dd;
+  border-radius: 8px;
+  padding: 16px;
+  background: #fbfcfa;
+}
+
+.task-title { display: flex; gap: 8px; align-items: center; font-weight: 800; }
+.status-chip { width: fit-content; border-radius: 999px; background: #eef2ea; padding: 5px 9px; font-size: 13px; }
+.quick-commands { display: flex; flex-wrap: wrap; gap: 8px; }
+.notice, .thin-status, .error { margin: 16px 0; border-radius: 8px; padding: 12px 14px; }
+.notice { background: #edf7f4; }
+.thin-status { background: #fff7df; }
+.error { background: #fff0ec; color: #923d25; }
+.privacy-note { color: #546259; font-size: 13px; margin-top: 12px; }
+
+@media (max-width: 860px) {
+  .topbar, .status-head { align-items: flex-start; flex-direction: column; }
+  .auth-grid, .status-layout, .settings-grid, .task-grid, .form-grid, .metric-grid {
+    grid-template-columns: 1fr;
+  }
+  .provider-form { grid-template-columns: 1fr; }
+  .intro { min-height: auto; padding-top: 24px; }
+  h1 { font-size: 36px; }
+}
