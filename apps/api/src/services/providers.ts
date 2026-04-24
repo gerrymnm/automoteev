@@ -1,3 +1,6 @@
+// Legacy helper retained so existing imports keep compiling.
+// Prefer `searchProviders` in ./places.ts for real Google Places lookups.
+
 export interface ProviderInput {
   name: string;
   email?: string | null;

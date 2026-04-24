@@ -173,6 +173,126 @@ textarea { min-height: 110px; resize: vertical; }
 .error { background: #fff0ec; color: #923d25; }
 .privacy-note { color: #546259; font-size: 13px; margin-top: 12px; }
 
+.consent-block {
+  display: grid;
+  gap: 10px;
+  margin-top: 20px;
+  padding: 16px;
+  border: 1px solid #e1e6dd;
+  border-radius: 8px;
+  background: #fafbf8;
+}
+.checkbox-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.checkbox-row input[type="checkbox"] {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+.button-row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ---------- Nudges banner ---------- */
+.nudges {
+  background: #fffaf0;
+  border-color: #e7d9ad;
+  margin: 18px 0;
+  padding: 16px 18px;
+}
+.nudges-head { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.nudges-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 8px 0;
+  display: grid;
+  gap: 6px;
+}
+.nudges-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #fcf1d8;
+}
+.ghost.small { padding: 4px 8px; font-size: 12px; display: inline-flex; align-items: center; gap: 4px; }
+
+/* ---------- Autonomy badge ---------- */
+.autonomy-badge {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px 18px;
+  background: #f3f7ee;
+  border-color: #c7d7b7;
+  margin-bottom: 16px;
+}
+.autonomy-badge.unlocked {
+  background: #eef7f2;
+  border-color: #9fc9b0;
+}
+.autonomy-badge strong { display: block; margin-bottom: 2px; }
+
+/* ---------- Sub-panels inside status hero ---------- */
+.sub-panel {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid #e2e6df;
+}
+.sub-panel h3 { margin: 0 0 10px 0; font-size: 16px; }
+
+.maint-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.maint-list li {
+  display: grid;
+  grid-template-columns: 90px 1fr auto;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #fbfcfa;
+  align-items: center;
+}
+.maint-name { font-weight: 600; text-transform: capitalize; }
+
+.chip {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: #eef2ea;
+  color: #45533e;
+  text-align: center;
+}
+.chip.overdue { background: #fde3d9; color: #8d3618; }
+.chip.due { background: #fff0c7; color: #7a5a10; }
+.chip.upcoming { background: #eef2ea; color: #45533e; }
+.chip.completed { background: #dceede; color: #2f5f3b; }
+
+/* ---------- Section heads for onboarding ---------- */
+.section-head {
+  margin: 18px 0 6px 0;
+  font-size: 15px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: #45533e;
+}
+
+/* ---------- Misc utility ---------- */
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; background: #f1f3ee; padding: 8px 10px; border-radius: 6px; }
+.small { font-size: 13px; }
+.muted { color: #637067; }
+
 @media (max-width: 860px) {
   .topbar, .status-head { align-items: flex-start; flex-direction: column; }
   .auth-grid, .status-layout, .settings-grid, .task-grid, .form-grid, .metric-grid {

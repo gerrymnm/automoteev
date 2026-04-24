@@ -9,6 +9,7 @@ interface AlertInput {
     next_service_due_miles: number | null;
     obd_mileage?: number | null;
     recall_status: string | null;
+    year?: number | null;
   };
   costProfile?: {
     total_monthly_cost_cents: number | null;
@@ -17,11 +18,21 @@ interface AlertInput {
   loanLease?: {
     balance_cents: number | null;
     lease_maturity_date: string | null;
+    principal_cents?: number | null;
+    term_months?: number | null;
+    start_date?: string | null;
   } | null;
   insurance?: {
     carrier_name: string | null;
     renewal_date: string | null;
+    coverage_type?: string | null;
   } | null;
+  maintenanceItems?: Array<{
+    due_mileage: number | null;
+    status: string;
+    item_type: string;
+  }> | null;
+  autonomyUnlocked?: boolean;
 }
 
 export function generateAlerts(input: AlertInput) {
@@ -37,7 +48,7 @@ export function generateAlerts(input: AlertInput) {
       alert_type: "open_recall",
       severity: "urgent",
       title: "Open recall needs attention",
-      body: "Automoteev can contact a service provider after you approve the details."
+      body: "Automoteev can contact a dealership service center to schedule recall work after you approve."
     });
   }
 
@@ -46,14 +57,14 @@ export function generateAlerts(input: AlertInput) {
       alert_type: "insurance_info_missing",
       severity: "recommended",
       title: "Insurance details missing",
-      body: "Add your carrier and renewal date so Automoteev only alerts you when it matters."
+      body: "Add your carrier, premium, and renewal date so Automoteev can alert you only when savings are available."
     });
   } else if (input.insurance.renewal_date && daysUntil(input.insurance.renewal_date) <= 30) {
     alerts.push({
       alert_type: "insurance_renewal_approaching",
       severity: "recommended",
       title: "Insurance renewal approaching",
-      body: "Automoteev can request quotes before your renewal date."
+      body: "Automoteev can request competing quotes before your renewal date."
     });
   }
 
@@ -62,7 +73,7 @@ export function generateAlerts(input: AlertInput) {
       alert_type: "loan_lease_info_missing",
       severity: "recommended",
       title: "Loan or lease details missing",
-      body: "Add balance and lender details to keep payoff and lease-end guidance accurate."
+      body: "Add balance, APR, and term so Automoteev can surface refinance savings and payoff options."
     });
   }
 
@@ -71,11 +82,14 @@ export function generateAlerts(input: AlertInput) {
       alert_type: "lease_maturity_approaching",
       severity: "urgent",
       title: "Lease maturity approaching",
-      body: "Automoteev can prepare a lease-end review and contact your provider after approval."
+      body: "Automoteev can prepare a lease-end review and contact your leasing company after approval."
     });
   }
 
-  const maintenance = maintenanceDue(input.vehicle);
+  const maintenance = maintenanceDue(
+    { mileage: input.vehicle.mileage, next_service_due_miles: input.vehicle.next_service_due_miles, year: input.vehicle.year },
+    (input.maintenanceItems ?? null) as any
+  );
   if (maintenance.service_due_soon || maintenance.service_overdue) {
     alerts.push({
       alert_type: "service_due_soon",
