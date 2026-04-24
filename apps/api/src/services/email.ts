@@ -50,7 +50,7 @@ export async function sendTaskEmail(params: SendTaskEmailParams): Promise<SendTa
       to: params.to,
       subject: params.subject,
       text: params.body,
-      replyTo,
+      reply_to: replyTo,
       headers
     });
 

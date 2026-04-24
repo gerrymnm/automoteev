@@ -39,7 +39,8 @@ export async function pendingPromptsForUser(userId: string) {
 
 function isDue(row: { last_prompted_at: string | null; prompt_count: number }): boolean {
   if (!row.last_prompted_at) return true;
-  const interval = NUDGE_INTERVAL_HOURS_BY_COUNT[Math.min(row.prompt_count, NUDGE_INTERVAL_HOURS_BY_COUNT.length - 1)];
+  const idx = Math.min(row.prompt_count, NUDGE_INTERVAL_HOURS_BY_COUNT.length - 1);
+  const interval = NUDGE_INTERVAL_HOURS_BY_COUNT[idx] ?? 24;
   const next = new Date(row.last_prompted_at).getTime() + interval * 60 * 60 * 1000;
   return next <= Date.now();
 }

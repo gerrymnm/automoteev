@@ -84,11 +84,14 @@ async function run() {
         items as MaintenanceItem[]
       );
       for (let i = 0; i < refreshed.length; i++) {
-        if (refreshed[i].status !== items[i].status) {
+        const nextItem = refreshed[i];
+        const prevItem = items[i];
+        if (!nextItem || !prevItem) continue;
+        if (nextItem.status !== prevItem.status) {
           await supabaseAdmin
             .from("maintenance_items")
-            .update({ status: refreshed[i].status })
-            .eq("id", refreshed[i].id);
+            .update({ status: nextItem.status })
+            .eq("id", nextItem.id);
           statusUpdates++;
         }
       }

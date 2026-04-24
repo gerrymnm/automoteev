@@ -16,9 +16,10 @@ export function proposeLocal(fullName: string): string {
 
   if (cleaned.length === 0) return "owner";
 
-  const first = cleaned[0];
-  const last = cleaned.length > 1 ? cleaned[cleaned.length - 1][0] : "";
-  return last ? `${first}.${last}` : first;
+  const first = cleaned[0] ?? "owner";
+  const lastWord = cleaned.length > 1 ? cleaned[cleaned.length - 1] : "";
+  const lastInitial = lastWord && lastWord.length > 0 ? lastWord[0] : "";
+  return lastInitial ? `${first}.${lastInitial}` : first;
 }
 
 /**

@@ -90,6 +90,9 @@ function toIsoDate(input: string): string | null {
   if (/^\d{4}-\d{2}-\d{2}$/.test(input)) return input;
   const m = input.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (!m) return null;
-  const [, d, mo, y] = m;
+  const d = m[1];
+  const mo = m[2];
+  const y = m[3];
+  if (!d || !mo || !y) return null;
   return `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`;
 }
