@@ -174,15 +174,39 @@ function AuthPanel() {
   const [password, setPassword] = useState("");
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setError(null);
-    const result =
-      mode === "signin"
-        ? await supabase.auth.signInWithPassword({ email, password })
-        : await supabase.auth.signUp({ email, password });
-    if (result.error) setError(result.error.message);
+    setInfo(null);
+    setBusy(true);
+    try {
+      if (mode === "signin") {
+        const result = await supabase.auth.signInWithPassword({ email, password });
+        if (result.error) setError(result.error.message);
+      } else {
+        const result = await supabase.auth.signUp({
+          email,
+          password,
+          options: { emailRedirectTo: window.location.origin }
+        });
+        if (result.error) {
+          setError(result.error.message);
+        } else if (result.data.session) {
+          // Email confirmation disabled — session exists, parent will pick it up.
+        } else {
+          setInfo(
+            "Check your email and click the confirmation link to finish creating your account. The link will return you here."
+          );
+        }
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -198,8 +222,19 @@ function AuthPanel() {
         <label>Email<input value={email} onChange={(event) => setEmail(event.target.value)} type="email" required /></label>
         <label>Password<input value={password} onChange={(event) => setPassword(event.target.value)} type="password" minLength={8} required /></label>
         {error && <div className="error">{error}</div>}
-        <button className="primary" type="submit">{mode === "signin" ? "Sign in" : "Sign up"}</button>
-        <button className="ghost" type="button" onClick={() => setMode(mode === "signin" ? "signup" : "signin")}>
+        {info && <div className="notice">{info}</div>}
+        <button className="primary" type="submit" disabled={busy}>
+          {busy ? "Working…" : mode === "signin" ? "Sign in" : "Sign up"}
+        </button>
+        <button
+          className="ghost"
+          type="button"
+          onClick={() => {
+            setMode(mode === "signin" ? "signup" : "signin");
+            setError(null);
+            setInfo(null);
+          }}
+        >
           {mode === "signin" ? "Create an account" : "Already have an account"}
         </button>
       </form>
