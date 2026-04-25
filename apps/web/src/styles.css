@@ -182,16 +182,32 @@ textarea { min-height: 110px; resize: vertical; }
   border-radius: 8px;
   background: #fafbf8;
 }
-.checkbox-row {
+label.checkbox-row {
   display: flex;
   gap: 10px;
   align-items: flex-start;
   font-size: 14px;
+  font-weight: 400;
   line-height: 1.45;
+  color: #18201b;
+  width: 100%;
 }
-.checkbox-row input[type="checkbox"] {
-  margin-top: 3px;
-  flex-shrink: 0;
+label.checkbox-row > input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  margin-top: 2px;
+  padding: 0;
+  flex: 0 0 auto;
+  accent-color: #176b5d;
+}
+label.checkbox-row > span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+label.checkbox-row a {
+  color: #176b5d;
+  text-decoration: underline;
 }
 .button-row { display: flex; gap: 8px; flex-wrap: wrap; }
 
