@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from "express";
-import crypto from "node:crypto";
 import type Stripe from "stripe";
+import { Webhook } from "svix";
 import { env } from "./config.js";
 import { supabaseAdmin } from "./supabase.js";
 import { stripe, verifyStripeWebhook } from "./services/stripe.js";
@@ -9,15 +9,7 @@ export const webhooks = Router();
 
 /**
  * Stripe subscription webhook.
- * Register in Stripe Dashboard → Webhooks → Add endpoint:
- *   https://<api-host>/webhooks/stripe
- * Subscribe to:
- *   checkout.session.completed
- *   customer.subscription.created
- *   customer.subscription.updated
- *   customer.subscription.deleted
- *   invoice.paid
- *   invoice.payment_failed
+ * Stripe uses its own HMAC scheme (NOT Svix), handled by stripe.webhooks.constructEvent.
  */
 webhooks.post("/webhooks/stripe", async (req: Request, res: Response) => {
   if (!stripe || !env.STRIPE_WEBHOOK_SECRET) {
@@ -83,7 +75,6 @@ webhooks.post("/webhooks/stripe", async (req: Request, res: Response) => {
         break;
       }
       default:
-        // no-op
         break;
     }
   } catch (err) {
@@ -96,25 +87,28 @@ webhooks.post("/webhooks/stripe", async (req: Request, res: Response) => {
 
 /**
  * Resend inbound webhook — dealer reply lands here.
- * Configure in Resend Dashboard → Receiving → add endpoint
- *   URL: https://<api-host>/webhooks/email/inbound
- *   Event: email.received
+ * Resend signs webhooks using Svix, so we use the svix library to verify.
  */
 webhooks.post("/webhooks/email/inbound", async (req: Request, res: Response) => {
   const rawBody = req.body as Buffer;
-  if (!verifyResendSignature(req, rawBody, env.RESEND_INBOUND_WEBHOOK_SECRET)) {
-    return res.status(401).json({ error: "invalid_signature" });
+  const verification = verifySvixSignature(req, rawBody, env.RESEND_INBOUND_WEBHOOK_SECRET);
+  if (!verification.valid) {
+    console.warn("inbound webhook signature failed:", verification.error);
+    return res.status(401).json({ error: "invalid_signature", detail: verification.error });
   }
 
-  let payload: any;
-  try {
-    payload = JSON.parse(rawBody.toString("utf8"));
-  } catch {
-    return res.status(400).json({ error: "invalid_json" });
-  }
+  const event = verification.payload as ResendInboundEvent;
+  const data = event?.data ?? event; // some Resend payloads nest under `data`, others don't
 
-  const toAddress = firstAddress(payload?.to);
-  const fromAddress = firstAddress(payload?.from);
+  console.log("[inbound] received event", {
+    type: event?.type,
+    from: data?.from,
+    to: data?.to,
+    subject: data?.subject
+  });
+
+  const toAddress = firstAddress(data?.to);
+  const fromAddress = firstAddress(data?.from);
   if (!toAddress) return res.status(202).json({ ignored: true, reason: "no_to" });
 
   // Route by local-part: gerry.m@mail.automoteev.com → find profile by agent_email_local
@@ -124,10 +118,18 @@ webhooks.post("/webhooks/email/inbound", async (req: Request, res: Response) => 
     .select("id")
     .eq("agent_email_local", localPart)
     .maybeSingle();
-  if (!profile) return res.status(202).json({ ignored: true, reason: "unknown_local" });
 
-  const inReplyTo = payload?.headers?.["in-reply-to"] ?? payload?.inReplyTo ?? null;
-  const threadId = payload?.threadId ?? inReplyTo ?? null;
+  if (!profile) {
+    console.log("[inbound] unknown local-part, ignoring:", localPart);
+    return res.status(202).json({ ignored: true, reason: "unknown_local", local: localPart });
+  }
+
+  const inReplyTo =
+    (data as any)?.headers?.["in-reply-to"] ??
+    (data as any)?.in_reply_to ??
+    (data as any)?.inReplyTo ??
+    null;
+  const threadId = (data as any)?.threadId ?? inReplyTo ?? null;
 
   // Try to find the originating outbound email to link the thread.
   let taskId: string | null = null;
@@ -146,38 +148,33 @@ webhooks.post("/webhooks/email/inbound", async (req: Request, res: Response) => 
     provider_id: null,
     to_email: toAddress,
     from_email: fromAddress ?? "unknown@unknown",
-    subject: payload?.subject ?? "(no subject)",
-    body_text: payload?.text ?? payload?.html ?? "",
+    subject: (data as any)?.subject ?? "(no subject)",
+    body_text: (data as any)?.text ?? (data as any)?.html ?? "",
     status: "received",
-    provider_message_id: payload?.messageId ?? null,
+    provider_message_id: (data as any)?.messageId ?? (data as any)?.message_id ?? null,
     direction: "inbound",
     thread_id: threadId,
     in_reply_to: inReplyTo,
     received_at: new Date().toISOString()
   });
 
+  console.log("[inbound] stored email for user:", profile.id);
   return res.json({ received: true });
 });
 
 /**
  * Resend events webhook (delivered, bounced, spam, opened, etc).
- * Configure in Resend Dashboard → Webhooks
- *   URL: https://<api-host>/webhooks/email/events
  */
 webhooks.post("/webhooks/email/events", async (req: Request, res: Response) => {
   const rawBody = req.body as Buffer;
-  if (!verifyResendSignature(req, rawBody, env.RESEND_EVENTS_WEBHOOK_SECRET)) {
-    return res.status(401).json({ error: "invalid_signature" });
+  const verification = verifySvixSignature(req, rawBody, env.RESEND_EVENTS_WEBHOOK_SECRET);
+  if (!verification.valid) {
+    console.warn("events webhook signature failed:", verification.error);
+    return res.status(401).json({ error: "invalid_signature", detail: verification.error });
   }
 
-  let event: { type?: string; data?: { email_id?: string } };
-  try {
-    event = JSON.parse(rawBody.toString("utf8"));
-  } catch {
-    return res.status(400).json({ error: "invalid_json" });
-  }
-
-  const messageId = event.data?.email_id;
+  const event = verification.payload as { type?: string; data?: { email_id?: string } };
+  const messageId = event?.data?.email_id;
   if (!messageId) return res.status(202).json({ ignored: true });
 
   const { data: emailRow } = await supabaseAdmin
@@ -198,6 +195,67 @@ webhooks.post("/webhooks/email/events", async (req: Request, res: Response) => {
 });
 
 // ---------- helpers ----------
+
+interface ResendInboundEvent {
+  type?: string;
+  data?: {
+    from?: unknown;
+    to?: unknown;
+    subject?: string;
+    text?: string;
+    html?: string;
+    headers?: Record<string, string>;
+    [key: string]: unknown;
+  };
+}
+
+interface SvixVerificationResult {
+  valid: boolean;
+  payload?: unknown;
+  error?: string;
+}
+
+function verifySvixSignature(
+  req: Request,
+  rawBody: Buffer,
+  secret: string | undefined
+): SvixVerificationResult {
+  // Dev-mode fallback: if no secret is set, accept the payload as-is.
+  if (!secret) {
+    try {
+      return { valid: true, payload: JSON.parse(rawBody.toString("utf8")) };
+    } catch {
+      return { valid: false, error: "invalid_json_no_secret" };
+    }
+  }
+
+  const svixId = req.header("svix-id");
+  const svixTimestamp = req.header("svix-timestamp");
+  const svixSignature = req.header("svix-signature");
+
+  if (!svixId || !svixTimestamp || !svixSignature) {
+    return {
+      valid: false,
+      error: `missing_headers (id=${!!svixId}, ts=${!!svixTimestamp}, sig=${!!svixSignature})`
+    };
+  }
+
+  try {
+    const wh = new Webhook(secret);
+    const payload = wh.verify(rawBody.toString("utf8"), {
+      "svix-id": svixId,
+      "svix-timestamp": svixTimestamp,
+      "svix-signature": svixSignature
+    });
+    return { valid: true, payload };
+  } catch (err) {
+    return {
+      valid: false,
+      error: err instanceof Error ? err.message : "verify_failed"
+    };
+  }
+}
+
 async function upsertSubscription(params: {
   userId: string;
   externalSubscriptionId: string | null;
@@ -243,25 +301,13 @@ function mapStripeStatus(status: Stripe.Subscription["status"]) {
 
 function firstAddress(input: unknown): string | null {
   if (!input) return null;
-  if (Array.isArray(input)) return typeof input[0] === "string" ? input[0] : (input[0] as any)?.address ?? null;
-  if (typeof input === "string") return input;
-  if (typeof input === "object") return (input as any).address ?? null;
-  return null;
-}
-
-function verifyResendSignature(req: Request, rawBody: Buffer, secret: string | undefined): boolean {
-  if (!secret) return true; // dev-mode fallback
-  const sig = req.header("resend-signature") ?? req.header("svix-signature");
-  if (!sig) return false;
-  try {
-    const payload = rawBody.toString("utf8");
-    const expected = crypto.createHmac("sha256", secret).update(payload).digest("hex");
-    const clean = sig.replace(/^sha256=/, "").trim();
-    return crypto.timingSafeEqual(
-      Buffer.from(clean.slice(0, expected.length).padEnd(expected.length, "0")),
-      Buffer.from(expected)
-    );
-  } catch {
-    return false;
+  if (Array.isArray(input)) {
+    const first = input[0];
+    if (typeof first === "string") return first;
+    if (first && typeof first === "object") return (first as any).address ?? (first as any).email ?? null;
+    return null;
   }
+  if (typeof input === "string") return input;
+  if (typeof input === "object") return (input as any).address ?? (input as any).email ?? null;
+  return null;
 }
