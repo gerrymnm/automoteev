@@ -1,4 +1,5 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
+import "express-async-errors";
 import { z } from "zod";
 import { requireAuth } from "./auth.js";
 import { audit } from "./audit.js";

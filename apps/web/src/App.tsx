@@ -213,9 +213,13 @@ function AuthPanel() {
     <section className="auth-grid">
       <div className="intro">
         <div className="brand">Automoteev</div>
-        <h1>Know what your vehicle needs, then approve what happens next.</h1>
-        <p>Secure, alert-driven ownership support for recalls, service, insurance, payoff requests, and sale prep.</p>
-        <div className="trust-row"><ShieldCheck size={18} /> No provider outreach without explicit approval.</div>
+        <h1>Save money on your car. Without lifting a finger.</h1>
+        <p>
+          Automoteev is the AI agent that watches your insurance, loan, and service costs —
+          finds savings, requests quotes from real providers, and acts on your behalf. You
+          only see the wins worth taking.
+        </p>
+        <div className="trust-row"><ShieldCheck size={18} /> Nothing gets sent to a provider without your approval.</div>
       </div>
       <form className="panel auth-card" onSubmit={submit}>
         <h2>{mode === "signin" ? "Sign in" : "Create account"}</h2>
@@ -281,30 +285,23 @@ function Onboarding({ onDone, email }: { onDone: () => void; email: string }) {
     mileage: "",
     ownership_type: "owned",
     monthly_payment_cents: "",
-    apr_bps: "",
+    apr_percent: "",
     lender_name: "",
     loan_lease_balance_cents: "",
-    principal_cents: "",
     term_months: "",
-    loan_start_date: "",
-    first_payment_date: "",
-    rate_type: "",
     lease_maturity_date: "",
     insurance_carrier: "",
     insurance_premium_cents: "",
-    insurance_renewal_date: "",
-    insurance_coverage_type: "",
-    insurance_deductible_cents: "",
-    insurance_liability_limits: "",
-    insurance_policy_number: ""
+    insurance_renewal_date: ""
   });
   const [consents, setConsents] = useState({
     reserve_obd: true,
-    accepted_tos: false,
-    accepted_privacy: false,
-    accepted_autonomy_consent: false
+    accepted_tos: true,
+    accepted_privacy: true,
+    accepted_autonomy_consent: true
   });
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -313,6 +310,7 @@ function Onboarding({ onDone, email }: { onDone: () => void; email: string }) {
       setError("Please accept all three agreements to continue.");
       return;
     }
+    setBusy(true);
     try {
       await api("/api/onboarding", {
         method: "POST",
@@ -321,6 +319,8 @@ function Onboarding({ onDone, email }: { onDone: () => void; email: string }) {
       onDone();
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : "Onboarding failed.");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -328,8 +328,8 @@ function Onboarding({ onDone, email }: { onDone: () => void; email: string }) {
     <form className="panel onboarding" onSubmit={submit}>
       <h1>Set up your vehicle</h1>
       <p className="muted">
-        Only VIN, mileage, and email are required. Skip anything you don't have handy —
-        Automoteev will nudge you later to fill in the rest.
+        VIN, mileage, name, and email are required. Everything else is optional — the more
+        you share, the more savings Automoteev can find.
       </p>
 
       <h3 className="section-head">Who you are</h3>
@@ -357,18 +357,8 @@ function Onboarding({ onDone, email }: { onDone: () => void; email: string }) {
         <Field label="Lender" value={form.lender_name} onChange={(value) => setForm({ ...form, lender_name: value })} />
         <Field label="Monthly payment" value={form.monthly_payment_cents} onChange={(value) => setForm({ ...form, monthly_payment_cents: value })} money />
         <Field label="Current balance" value={form.loan_lease_balance_cents} onChange={(value) => setForm({ ...form, loan_lease_balance_cents: value })} money />
-        <Field label="Original principal" value={form.principal_cents} onChange={(value) => setForm({ ...form, principal_cents: value })} money />
-        <Field label="APR (basis points)" value={form.apr_bps} onChange={(value) => setForm({ ...form, apr_bps: value })} />
+        <Field label="APR (%)" value={form.apr_percent} onChange={(value) => setForm({ ...form, apr_percent: value })} decimal placeholder="e.g. 6.49" />
         <Field label="Term (months)" value={form.term_months} onChange={(value) => setForm({ ...form, term_months: value })} />
-        <Field label="Loan start date" value={form.loan_start_date} onChange={(value) => setForm({ ...form, loan_start_date: value })} type="date" />
-        <Field label="First payment date" value={form.first_payment_date} onChange={(value) => setForm({ ...form, first_payment_date: value })} type="date" />
-        <label>Rate type
-          <select value={form.rate_type} onChange={(event) => setForm({ ...form, rate_type: event.target.value })}>
-            <option value="">—</option>
-            <option value="fixed">Fixed</option>
-            <option value="variable">Variable</option>
-          </select>
-        </label>
         <Field label="Lease maturity date" value={form.lease_maturity_date} onChange={(value) => setForm({ ...form, lease_maturity_date: value })} type="date" />
       </div>
 
@@ -377,17 +367,6 @@ function Onboarding({ onDone, email }: { onDone: () => void; email: string }) {
         <Field label="Carrier" value={form.insurance_carrier} onChange={(value) => setForm({ ...form, insurance_carrier: value })} />
         <Field label="Monthly premium" value={form.insurance_premium_cents} onChange={(value) => setForm({ ...form, insurance_premium_cents: value })} money />
         <Field label="Renewal date" value={form.insurance_renewal_date} onChange={(value) => setForm({ ...form, insurance_renewal_date: value })} type="date" />
-        <label>Coverage type
-          <select value={form.insurance_coverage_type} onChange={(event) => setForm({ ...form, insurance_coverage_type: event.target.value })}>
-            <option value="">—</option>
-            <option value="liability">Liability only</option>
-            <option value="full">Full coverage</option>
-            <option value="comprehensive">Comprehensive</option>
-            <option value="unknown">Not sure</option>
-          </select>
-        </label>
-        <Field label="Deductible" value={form.insurance_deductible_cents} onChange={(value) => setForm({ ...form, insurance_deductible_cents: value })} money />
-        <Field label="Liability limits (e.g. 100/300/100)" value={form.insurance_liability_limits} onChange={(value) => setForm({ ...form, insurance_liability_limits: value })} />
       </div>
 
       <div className="consent-block">
@@ -414,7 +393,9 @@ function Onboarding({ onDone, email }: { onDone: () => void; email: string }) {
       </div>
 
       {error && <div className="error">{error}</div>}
-      <button className="primary" type="submit"><Plus size={18} /> Create vehicle profile</button>
+      <button className="primary" type="submit" disabled={busy}>
+        <Plus size={18} /> {busy ? "Creating profile…" : "Create vehicle profile"}
+      </button>
     </form>
   );
 }
@@ -861,7 +842,9 @@ function Field({
   onChange,
   required,
   type = "text",
-  money: isMoney
+  money: isMoney,
+  decimal,
+  placeholder
 }: {
   label: string;
   value: string;
@@ -869,7 +852,11 @@ function Field({
   required?: boolean;
   type?: string;
   money?: boolean;
+  decimal?: boolean;
+  placeholder?: string;
 }) {
+  const inputType = isMoney || decimal ? "number" : type;
+  const step = isMoney || decimal ? "0.01" : undefined;
   return (
     <label>
       {label}
@@ -877,8 +864,11 @@ function Field({
         value={value}
         onChange={(event) => onChange(event.target.value)}
         required={required}
-        type={isMoney ? "number" : type}
-        min={isMoney ? 0 : undefined}
+        type={inputType}
+        step={step}
+        min={isMoney || decimal ? 0 : undefined}
+        placeholder={placeholder}
+        inputMode={isMoney || decimal ? "decimal" : undefined}
       />
     </label>
   );
@@ -893,8 +883,17 @@ function normalizeForm<T extends Record<string, string>>(form: T) {
   return Object.fromEntries(
     Object.entries(form).map(([key, value]) => {
       if (value === "") return [key, null];
-      if (key.endsWith("_cents")) return [key, Math.round(Number(value) * 100)];
-      if (["mileage", "apr_bps", "term_months"].includes(key)) return [key, Number(value)];
+      if (key.endsWith("_cents")) {
+        // Allow decimals like 450.50 → 45050 cents.
+        return [key, Math.round(Number(value) * 100)];
+      }
+      // APR is entered as a percentage (e.g. 6.49) and stored as basis points (649).
+      if (key === "apr_percent") {
+        return ["apr_bps", Math.round(Number(value) * 100)];
+      }
+      if (["mileage", "term_months"].includes(key)) {
+        return [key, Math.round(Number(value))];
+      }
       return [key, value];
     })
   );
