@@ -6,10 +6,11 @@ import { audit } from "./audit.js";
 import { env } from "./config.js";
 import { calculateCosts } from "./engines/cost.js";
 import { generateAlerts, statusFromAlerts } from "./engines/alerts.js";
+import { generateInsights, statusFromInsights } from "./engines/insights.js";
+import { estimateVehicleValue } from "./services/valuation.js";
 import {
   maintenanceDue,
-  seedMaintenanceItems,
-  refreshItemStatuses
+  seedMaintenanceItems
 } from "./engines/maintenance.js";
 import { taskFromCommand } from "./engines/tasks.js";
 import {
@@ -158,6 +159,15 @@ router.post("/api/onboarding", async (req, res) => {
     obd_mileage: null,
     year: decoded.year
   });
+
+  // Estimate value up front so dashboard isn't blank.
+  const valuation = estimateVehicleValue({
+    year: decoded.year,
+    make: decoded.make,
+    model: decoded.model,
+    mileage: payload.mileage
+  });
+
   const { data: vehicle, error: vehicleError } = await req
     .db!.from("vehicles")
     .insert({
@@ -169,7 +179,15 @@ router.post("/api/onboarding", async (req, res) => {
       trim: decoded.trim,
       mileage: payload.mileage,
       ownership_type: payload.ownership_type,
-      estimated_value_cents: null,
+      estimated_value_cents:
+        valuation
+          ? Math.round((valuation.market_value_low_cents + valuation.market_value_high_cents) / 2)
+          : null,
+      market_value_low_cents: valuation?.market_value_low_cents ?? null,
+      market_value_high_cents: valuation?.market_value_high_cents ?? null,
+      dealer_value_low_cents: valuation?.dealer_value_low_cents ?? null,
+      dealer_value_high_cents: valuation?.dealer_value_high_cents ?? null,
+      value_estimated_at: valuation ? new Date().toISOString() : null,
       next_service_due_miles: maintenance.next_service_due_miles,
       recall_status: "unknown",
       overall_status: "action_recommended"
@@ -177,6 +195,38 @@ router.post("/api/onboarding", async (req, res) => {
     .select()
     .single();
   if (vehicleError) return res.status(400).json({ error: vehicleError.message });
+
+  // 5b. Run recall lookup in the background — don't block onboarding if NHTSA is slow.
+  void (async () => {
+    try {
+      const recall = await lookupRecallsByVehicle({
+        make: decoded.make,
+        model: decoded.model,
+        modelYear: decoded.year
+      });
+      if (recall.campaigns.length) {
+        await req.db!.from("recalls").upsert(
+          recall.campaigns.map((c) => ({
+            user_id: req.user!.id,
+            vehicle_id: vehicle.id,
+            nhtsa_campaign_id: c.nhtsa_campaign_id,
+            summary: c.summary,
+            component: c.component,
+            consequence: c.consequence,
+            remedy: c.remedy,
+            reported_at: c.reported_at
+          })),
+          { onConflict: "vehicle_id,nhtsa_campaign_id", ignoreDuplicates: true }
+        );
+      }
+      await req
+        .db!.from("vehicles")
+        .update({ recall_status: recall.hasOpenRecall ? "open" : "clear" })
+        .eq("id", vehicle.id);
+    } catch (err) {
+      console.error("[onboarding] recall lookup failed (non-fatal)", err);
+    }
+  })();
 
   // 6. Cost profile
   const costs = calculateCosts({
@@ -286,41 +336,100 @@ router.get("/api/vehicles/:id/dashboard", async (req, res) => {
   );
   if (!vehicle) return res.status(404).json({ error: "Vehicle not found" });
 
-  const [costProfile, loanLease, insurance, alertsRes, maintRes, recallsRes] =
-    await Promise.all([
-      one(
-        req.db!.from("vehicle_cost_profiles").select("*").eq("vehicle_id", vehicleId)
-      ),
-      one(req.db!.from("loan_lease_accounts").select("*").eq("vehicle_id", vehicleId)),
-      one(req.db!.from("insurance_accounts").select("*").eq("vehicle_id", vehicleId)),
-      req
-        .db!.from("vehicle_alerts")
-        .select("*")
-        .eq("vehicle_id", vehicleId)
-        .eq("is_resolved", false)
-        .order("created_at", { ascending: false }),
-      req
-        .db!.from("maintenance_items")
-        .select("*")
-        .eq("vehicle_id", vehicleId)
-        .order("due_mileage", { ascending: true }),
-      req
-        .db!.from("recalls")
-        .select("*")
-        .eq("vehicle_id", vehicleId)
-        .is("resolved_at", null)
-        .order("reported_at", { ascending: false })
-    ]);
+  const [
+    costProfile,
+    loanLease,
+    insurance,
+    maintRes,
+    recallsRes,
+    providersRes,
+    fuelRes
+  ] = await Promise.all([
+    one(req.db!.from("vehicle_cost_profiles").select("*").eq("vehicle_id", vehicleId)),
+    one(req.db!.from("loan_lease_accounts").select("*").eq("vehicle_id", vehicleId)),
+    one(req.db!.from("insurance_accounts").select("*").eq("vehicle_id", vehicleId)),
+    req
+      .db!.from("maintenance_items")
+      .select("*")
+      .eq("vehicle_id", vehicleId)
+      .order("due_mileage", { ascending: true }),
+    req
+      .db!.from("recalls")
+      .select("*")
+      .eq("vehicle_id", vehicleId)
+      .is("resolved_at", null)
+      .order("reported_at", { ascending: false }),
+    req
+      .db!.from("providers")
+      .select("id")
+      .eq("is_preferred", true)
+      .limit(1),
+    req
+      .db!.from("fuel_entries")
+      .select("entry_date")
+      .eq("vehicle_id", vehicleId)
+      .order("entry_date", { ascending: false })
+      .limit(1)
+  ]);
+
+  // Generate insights inline so the user always sees the freshest list.
+  const lastShoppedAt = (insurance as any)?.last_shopped_at;
+  const daysSinceLastInsuranceShop = lastShoppedAt
+    ? Math.floor((Date.now() - new Date(lastShoppedAt).getTime()) / 86_400_000)
+    : null;
+  const lastFuelEntry = fuelRes.data?.[0]?.entry_date;
+  const monthsSinceLastFuelEntry = lastFuelEntry
+    ? Math.floor((Date.now() - new Date(lastFuelEntry).getTime()) / (30 * 86_400_000))
+    : null;
+
+  const insights = generateInsights({
+    vehicle,
+    costProfile,
+    loanLease,
+    insurance,
+    maintenanceItems: (maintRes.data ?? []) as any,
+    openRecallCount: (recallsRes.data ?? []).length,
+    preferredServiceShopExists: (providersRes.data ?? []).length > 0,
+    monthsSinceLastFuelEntry,
+    daysSinceLastInsuranceShop
+  });
+  const overallStatus = statusFromInsights(insights);
+
+  // Drift-correct the cached overall_status whenever it differs from what the
+  // engine computes right now. Cheap.
+  if (vehicle.overall_status !== overallStatus) {
+    await req
+      .db!.from("vehicles")
+      .update({ overall_status: overallStatus })
+      .eq("id", vehicleId);
+    vehicle.overall_status = overallStatus;
+  }
+
+  // Total estimated savings the user could capture from the recommended actions.
+  const totalEstimatedSavings = insights.reduce(
+    (sum, i) => sum + (i.estimated_savings_usd_per_year ?? 0),
+    0
+  );
 
   return res.json({
     vehicle,
+    valuation: vehicle.market_value_low_cents
+      ? {
+          market_value_low_cents: vehicle.market_value_low_cents,
+          market_value_high_cents: vehicle.market_value_high_cents,
+          dealer_value_low_cents: vehicle.dealer_value_low_cents,
+          dealer_value_high_cents: vehicle.dealer_value_high_cents,
+          estimated_at: vehicle.value_estimated_at
+        }
+      : null,
     cost_profile: costProfile,
     loan_lease: loanLease,
     insurance,
-    alerts: alertsRes.data ?? [],
-    maintenance_items: maintRes.data ?? [],
+    insights,
     open_recalls: recallsRes.data ?? [],
-    recommended_action: (alertsRes.data ?? [])[0] ?? null
+    maintenance_items: maintRes.data ?? [],
+    recommended_action: insights[0] ?? null,
+    total_estimated_annual_savings_usd: totalEstimatedSavings
   });
 });
 
@@ -1051,6 +1160,92 @@ router.post("/api/jobs/:jobName/run", async (req, res) => {
     summary: `Placeholder job run: ${jobName}`
   });
   return res.json({ ok: true, job: jobName, mode: "placeholder" });
+});
+
+// ---------- Vehicle valuation ----------
+
+router.post("/api/vehicles/:id/value/refresh", async (req, res) => {
+  const vehicleId = z.string().uuid().parse(req.params.id);
+  const vehicle = await one(
+    req.db!.from("vehicles").select("*").eq("id", vehicleId)
+  );
+  if (!vehicle) return res.status(404).json({ error: "Vehicle not found" });
+
+  const valuation = estimateVehicleValue({
+    year: vehicle.year,
+    make: vehicle.make,
+    model: vehicle.model,
+    mileage: vehicle.mileage
+  });
+  if (!valuation) {
+    return res.status(422).json({ error: "Cannot estimate value without year/make/model." });
+  }
+
+  await req
+    .db!.from("vehicles")
+    .update({
+      market_value_low_cents: valuation.market_value_low_cents,
+      market_value_high_cents: valuation.market_value_high_cents,
+      dealer_value_low_cents: valuation.dealer_value_low_cents,
+      dealer_value_high_cents: valuation.dealer_value_high_cents,
+      estimated_value_cents: Math.round(
+        (valuation.market_value_low_cents + valuation.market_value_high_cents) / 2
+      ),
+      value_estimated_at: new Date().toISOString()
+    })
+    .eq("id", vehicleId);
+
+  await audit({
+    userId: req.user!.id,
+    vehicleId,
+    eventType: "value_refreshed",
+    summary: "Vehicle value estimate refreshed"
+  });
+
+  return res.json({ valuation });
+});
+
+// ---------- Fuel log ----------
+
+router.get("/api/vehicles/:id/fuel", async (req, res) => {
+  const vehicleId = z.string().uuid().parse(req.params.id);
+  const { data, error } = await req
+    .db!.from("fuel_entries")
+    .select("*")
+    .eq("vehicle_id", vehicleId)
+    .order("entry_date", { ascending: false })
+    .limit(50);
+  if (error) return res.status(400).json({ error: error.message });
+  return res.json({ entries: data ?? [] });
+});
+
+router.post("/api/vehicles/:id/fuel", async (req, res) => {
+  const vehicleId = z.string().uuid().parse(req.params.id);
+  const payload = z
+    .object({
+      entry_date: z.string(),
+      total_cents: z.number().int().nonnegative(),
+      gallons: z.number().nonnegative().nullable().optional(),
+      odometer_miles: z.number().int().nonnegative().nullable().optional(),
+      notes: z.string().nullable().optional()
+    })
+    .parse(req.body);
+
+  const { data, error } = await req
+    .db!.from("fuel_entries")
+    .insert({
+      user_id: req.user!.id,
+      vehicle_id: vehicleId,
+      entry_date: payload.entry_date,
+      total_cents: payload.total_cents,
+      gallons: payload.gallons ?? null,
+      odometer_miles: payload.odometer_miles ?? null,
+      notes: payload.notes ?? null
+    })
+    .select()
+    .single();
+  if (error) return res.status(400).json({ error: error.message });
+  return res.status(201).json({ entry: data });
 });
 
 // ---------- Helpers ----------

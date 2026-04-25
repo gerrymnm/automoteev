@@ -16,6 +16,26 @@ export type MaintenanceStatus =
   | "completed"
   | "skipped";
 
+export type InsightSeverity = "info" | "recommended" | "urgent";
+export type InsightCategory =
+  | "savings"
+  | "safety"
+  | "completeness"
+  | "maintenance"
+  | "action_ready"
+  | "info";
+
+export interface Insight {
+  key: string;
+  category: InsightCategory;
+  severity: InsightSeverity;
+  title: string;
+  body: string;
+  cta_label: string;
+  cta_route: string;
+  estimated_savings_usd_per_year?: number;
+}
+
 export interface Profile {
   id: string;
   full_name: string;
@@ -36,6 +56,11 @@ export interface Vehicle {
   mileage: number;
   ownership_type: "owned" | "financed" | "leased";
   estimated_value_cents: number | null;
+  market_value_low_cents: number | null;
+  market_value_high_cents: number | null;
+  dealer_value_low_cents: number | null;
+  dealer_value_high_cents: number | null;
+  value_estimated_at: string | null;
   overall_status: OverallStatus;
   next_service_due_miles: number | null;
   recall_status: string | null;
@@ -45,14 +70,6 @@ export interface CostProfile {
   total_monthly_cost_cents: number | null;
   annual_cost_cents: number | null;
   missing_fields: string[] | null;
-}
-
-export interface Alert {
-  id: string;
-  title: string;
-  body: string;
-  severity: "info" | "recommended" | "urgent";
-  alert_type: string;
 }
 
 export interface Task {
@@ -75,6 +92,7 @@ export interface Provider {
   phone: string | null;
   provider_type: string;
   location: string | null;
+  is_preferred?: boolean;
 }
 
 export interface MaintenanceItem {
@@ -96,15 +114,34 @@ export interface RecallRecord {
   reported_at: string | null;
 }
 
+export interface Valuation {
+  market_value_low_cents: number;
+  market_value_high_cents: number;
+  dealer_value_low_cents: number;
+  dealer_value_high_cents: number;
+  estimated_at: string | null;
+}
+
 export interface Dashboard {
   vehicle: Vehicle;
+  valuation: Valuation | null;
   cost_profile: CostProfile | null;
-  loan_lease: { balance_cents: number | null; lease_maturity_date: string | null } | null;
-  insurance: { carrier_name: string | null; renewal_date: string | null; premium_cents: number | null } | null;
-  alerts: Alert[];
-  maintenance_items?: MaintenanceItem[];
-  open_recalls?: RecallRecord[];
-  recommended_action: Alert | null;
+  loan_lease: {
+    balance_cents: number | null;
+    lease_maturity_date: string | null;
+    apr_bps: number | null;
+    monthly_payment_cents: number | null;
+  } | null;
+  insurance: {
+    carrier_name: string | null;
+    renewal_date: string | null;
+    premium_cents: number | null;
+  } | null;
+  insights: Insight[];
+  maintenance_items: MaintenanceItem[];
+  open_recalls: RecallRecord[];
+  recommended_action: Insight | null;
+  total_estimated_annual_savings_usd: number;
 }
 
 export interface AutonomyStatus {
