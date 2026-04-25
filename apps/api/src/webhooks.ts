@@ -97,8 +97,8 @@ webhooks.post("/webhooks/email/inbound", async (req: Request, res: Response) => 
     return res.status(401).json({ error: "invalid_signature", detail: verification.error });
   }
 
-  const event = verification.payload as ResendInboundEvent;
-  const data = event?.data ?? event; // some Resend payloads nest under `data`, others don't
+  const event = verification.payload as Record<string, any>;
+  const data: Record<string, any> = event?.data ?? event; // Resend payloads sometimes nest under `data`
 
   console.log("[inbound] received event", {
     type: event?.type,
@@ -125,11 +125,11 @@ webhooks.post("/webhooks/email/inbound", async (req: Request, res: Response) => 
   }
 
   const inReplyTo =
-    (data as any)?.headers?.["in-reply-to"] ??
-    (data as any)?.in_reply_to ??
-    (data as any)?.inReplyTo ??
+    data?.headers?.["in-reply-to"] ??
+    data?.in_reply_to ??
+    data?.inReplyTo ??
     null;
-  const threadId = (data as any)?.threadId ?? inReplyTo ?? null;
+  const threadId = data?.threadId ?? inReplyTo ?? null;
 
   // Try to find the originating outbound email to link the thread.
   let taskId: string | null = null;
@@ -148,10 +148,10 @@ webhooks.post("/webhooks/email/inbound", async (req: Request, res: Response) => 
     provider_id: null,
     to_email: toAddress,
     from_email: fromAddress ?? "unknown@unknown",
-    subject: (data as any)?.subject ?? "(no subject)",
-    body_text: (data as any)?.text ?? (data as any)?.html ?? "",
+    subject: data?.subject ?? "(no subject)",
+    body_text: data?.text ?? data?.html ?? "",
     status: "received",
-    provider_message_id: (data as any)?.messageId ?? (data as any)?.message_id ?? null,
+    provider_message_id: data?.messageId ?? data?.message_id ?? null,
     direction: "inbound",
     thread_id: threadId,
     in_reply_to: inReplyTo,
@@ -195,19 +195,6 @@ webhooks.post("/webhooks/email/events", async (req: Request, res: Response) => {
 });
 
 // ---------- helpers ----------
-
-interface ResendInboundEvent {
-  type?: string;
-  data?: {
-    from?: unknown;
-    to?: unknown;
-    subject?: string;
-    text?: string;
-    html?: string;
-    headers?: Record<string, string>;
-    [key: string]: unknown;
-  };
-}
 
 interface SvixVerificationResult {
   valid: boolean;
