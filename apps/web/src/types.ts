@@ -117,6 +117,21 @@ export interface Provider {
   is_preferred?: boolean;
 }
 
+export interface DispatchProvider extends Provider {
+  derived_email_basis?: "verified" | "best_guess" | "none";
+  rating?: number | null;
+  rating_count?: number | null;
+  website?: string | null;
+}
+
+export interface DispatchPayload {
+  task: Task;
+  providers: DispatchProvider[];
+  preferred_provider_id: string | null;
+  email_preview: { subject: string; body: string };
+  already_existed?: boolean;
+}
+
 export interface MaintenanceItem {
   id: string;
   item_type: string;

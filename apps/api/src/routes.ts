@@ -35,6 +35,7 @@ import { sendTaskEmail } from "./services/email.js";
 import { taskEmailBody, taskEmailSubject } from "./services/emailTemplates.js";
 import { createProCheckoutSession } from "./services/stripe.js";
 import { searchProviders } from "./services/places.js";
+import { discoverProvidersForTask, isDispatchable, type DispatchableTaskType } from "./services/dealer-discovery.js";
 import { getGasPrice, getMaintenanceCost } from "./services/market.js";
 import { assignAgentEmailLocal, composeAgentAddress } from "./services/alias.js";
 import {
@@ -1373,6 +1374,19 @@ router.post("/api/insights/act", async (req, res) => {
         .limit(1)
     );
     if (existingActive) {
+      // Hand back the existing task plus a fresh dispatch payload (so the user
+      // can pick dealers / send) if this is a dispatchable task type.
+      const dispatchPayload = isDispatchable(taskType)
+        ? await buildDispatchPayload(req.user!.id, vehicle, existingActive as any, taskType)
+        : null;
+      if (dispatchPayload) {
+        return res.status(200).json({
+          action: "open_dispatch",
+          task: existingActive,
+          ...dispatchPayload,
+          already_existed: true
+        });
+      }
       return res.status(200).json({
         action: "task_created",
         task: existingActive,
@@ -1405,6 +1419,20 @@ router.post("/api/insights/act", async (req, res) => {
       eventType: "insight_acted",
       summary: `Insight "${insight.title}" → task created (${insight.category})`
     });
+
+    // If this is a dispatchable task type, do discovery + draft email + return
+    // everything the user needs to review and send. They sign off via the
+    // DispatchModal (one tap = approve + send).
+    if (isDispatchable(taskType)) {
+      const dispatchPayload = await buildDispatchPayload(req.user!.id, vehicle, task, taskType);
+      if (dispatchPayload) {
+        return res.status(201).json({
+          action: "open_dispatch",
+          task,
+          ...dispatchPayload
+        });
+      }
+    }
 
     return res.status(201).json({
       action: "task_created",
@@ -1591,6 +1619,314 @@ router.post("/api/mcp/connections/:id/revoke", async (req, res) => {
     .eq("id", id)
     .eq("user_id", req.user!.id);
   return res.json({ revoked: id });
+});
+
+// ---------- Dispatch (send approved task to many providers in one go) ----------
+
+/**
+ * Build the dispatch payload for a task: discover providers, generate the
+ * email, and reuse any existing preferred provider. Returns null only if
+ * we can't fetch user/vehicle context.
+ */
+async function buildDispatchPayload(
+  userId: string,
+  vehicle: any,
+  task: any,
+  taskType: DispatchableTaskType
+) {
+  const profile = await one(
+    supabaseAdmin.from("profiles").select("*").eq("id", userId)
+  );
+  if (!profile) return null;
+
+  // Pull existing preferred provider for this user (if any) so we can
+  // pre-select it. Type-loose since the providers table doesn't carry vehicle_id.
+  const existingPreferred = await one(
+    supabaseAdmin
+      .from("providers")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("is_preferred", true)
+      .limit(1)
+  );
+
+  // Discover up to 5 candidates via Google Places.
+  const discovered = await discoverProvidersForTask({
+    taskType,
+    vehicleMake: vehicle.make ?? null,
+    zipCode: (profile as any).zip_code ?? null,
+    maxResults: 5
+  });
+
+  // Upsert each discovered provider so it has an id we can dispatch to.
+  // Dedupe on (user_id, name, location) which is good enough for MVP.
+  const inserted: any[] = [];
+  for (const d of discovered) {
+    const { data: existing } = await supabaseAdmin
+      .from("providers")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("name", d.name)
+      .eq("location", d.location ?? "")
+      .maybeSingle();
+
+    if (existing) {
+      // Refresh email if we now have a derived one and the row didn't.
+      if (!existing.email && d.derived_email) {
+        await supabaseAdmin
+          .from("providers")
+          .update({ email: d.derived_email })
+          .eq("id", existing.id);
+        existing.email = d.derived_email;
+      }
+      inserted.push({
+        ...existing,
+        derived_email_basis: existing.email === d.derived_email ? d.derived_email_basis : "verified",
+        rating: d.rating,
+        rating_count: d.rating_count,
+        website: d.website
+      });
+    } else {
+      const { data: created } = await supabaseAdmin
+        .from("providers")
+        .insert({
+          user_id: userId,
+          name: d.name,
+          email: d.derived_email,
+          phone: d.phone,
+          provider_type: d.provider_type,
+          location: d.location,
+          is_preferred: false
+        })
+        .select()
+        .single();
+      if (created) {
+        inserted.push({
+          ...created,
+          derived_email_basis: d.derived_email_basis,
+          rating: d.rating,
+          rating_count: d.rating_count,
+          website: d.website
+        });
+      }
+    }
+  }
+
+  // If user has a preferred provider that's not in the discovered list, prepend it.
+  let providers = inserted;
+  if (existingPreferred && !providers.find((p) => p.id === (existingPreferred as any).id)) {
+    providers = [
+      {
+        ...(existingPreferred as any),
+        derived_email_basis: "verified",
+        rating: null,
+        rating_count: null,
+        website: null
+      },
+      ...providers
+    ];
+  }
+
+  const vehicleName =
+    `${vehicle.year ?? ""} ${vehicle.make ?? ""} ${vehicle.model ?? ""}`.trim() || "vehicle";
+  const subject = taskEmailSubject(task.task_type as TaskType, vehicleName);
+  const body = taskEmailBody({
+    type: task.task_type as TaskType,
+    userName: (profile as any).full_name,
+    vehicleName,
+    vin: vehicle.vin,
+    mileage: vehicle.mileage,
+    notes: null
+  });
+
+  return {
+    providers,
+    preferred_provider_id: (existingPreferred as any)?.id ?? null,
+    email_preview: { subject, body }
+  };
+}
+
+router.get("/api/tasks/:id/dispatch-preview", async (req, res) => {
+  const taskId = z.string().uuid().parse(req.params.id);
+  const task = await one(req.db!.from("vehicle_tasks").select("*").eq("id", taskId));
+  if (!task) return res.status(404).json({ error: "Task not found" });
+  if (!isDispatchable((task as any).task_type)) {
+    return res.status(400).json({ error: "Task type is not dispatchable" });
+  }
+  const vehicle = await one(
+    req.db!.from("vehicles").select("*").eq("id", (task as any).vehicle_id)
+  );
+  if (!vehicle) return res.status(404).json({ error: "Vehicle not found" });
+
+  const payload = await buildDispatchPayload(
+    req.user!.id,
+    vehicle,
+    task,
+    (task as any).task_type as DispatchableTaskType
+  );
+  if (!payload) return res.status(400).json({ error: "Could not build dispatch payload" });
+
+  return res.json({ action: "open_dispatch", task, ...payload });
+});
+
+router.post("/api/tasks/:id/dispatch", async (req, res) => {
+  const taskId = z.string().uuid().parse(req.params.id);
+  const schema = z.object({
+    provider_ids: z.array(z.string().uuid()).min(1).max(10),
+    preferred_id: z.string().uuid().nullable().optional(),
+    custom_subject: z.string().optional(),
+    custom_body: z.string().optional(),
+    overrides: z
+      .record(z.object({ email: z.string().email().optional() }))
+      .optional()
+  });
+  const { provider_ids, preferred_id, custom_subject, custom_body, overrides } =
+    schema.parse(req.body ?? {});
+
+  const task = await one(req.db!.from("vehicle_tasks").select("*").eq("id", taskId));
+  if (!task) return res.status(404).json({ error: "Task not found" });
+
+  // Pro gate — actual outbound email is Pro-only.
+  if (!(await isPro(req.user!.id))) {
+    return res
+      .status(402)
+      .json({ error: "Automoteev Pro is required to dispatch outreach to providers." });
+  }
+
+  const [profile, vehicle, providers] = await Promise.all([
+    one(req.db!.from("profiles").select("*").eq("id", req.user!.id)),
+    one(req.db!.from("vehicles").select("*").eq("id", (task as any).vehicle_id)),
+    req.db!.from("providers").select("*").in("id", provider_ids)
+  ]);
+  if (!profile || !vehicle) {
+    return res.status(400).json({ error: "Missing profile or vehicle" });
+  }
+  if (!(profile as any).agent_email_local) {
+    return res.status(400).json({
+      error: "Agent email alias not assigned. Re-run onboarding to resolve."
+    });
+  }
+  const providerRows = (providers.data ?? []) as any[];
+  if (providerRows.length === 0) {
+    return res.status(400).json({ error: "No providers found for given IDs" });
+  }
+
+  // Apply per-provider email overrides from the modal (user can edit a guessed email).
+  for (const p of providerRows) {
+    const override = overrides?.[p.id]?.email;
+    if (override && override !== p.email) {
+      await req.db!.from("providers").update({ email: override }).eq("id", p.id);
+      p.email = override;
+    }
+  }
+
+  // Mark the chosen one as preferred (and unset others for this user).
+  if (preferred_id) {
+    await supabaseAdmin
+      .from("providers")
+      .update({ is_preferred: false })
+      .eq("user_id", req.user!.id)
+      .eq("is_preferred", true);
+    await supabaseAdmin
+      .from("providers")
+      .update({ is_preferred: true })
+      .eq("id", preferred_id)
+      .eq("user_id", req.user!.id);
+  }
+
+  const vehicleName =
+    `${(vehicle as any).year ?? ""} ${(vehicle as any).make ?? ""} ${(vehicle as any).model ?? ""}`.trim() ||
+    "vehicle";
+  const subject = custom_subject ?? taskEmailSubject((task as any).task_type as TaskType, vehicleName);
+  const text =
+    custom_body ??
+    taskEmailBody({
+      type: (task as any).task_type as TaskType,
+      userName: (profile as any).full_name,
+      vehicleName,
+      vin: (vehicle as any).vin,
+      mileage: (vehicle as any).mileage,
+      notes: null
+    });
+
+  // Send to each provider that has an email. Track skips for the response.
+  let sent = 0;
+  const skipped: Array<{ provider_id: string; reason: string }> = [];
+  const sentLogs: any[] = [];
+  for (const p of providerRows) {
+    if (!p.email) {
+      skipped.push({ provider_id: p.id, reason: "no_email" });
+      continue;
+    }
+    try {
+      const result = await sendTaskEmail({
+        to: p.email,
+        fromLocal: (profile as any).agent_email_local,
+        fromDisplayName: (profile as any).full_name,
+        subject,
+        body: text
+      });
+      const { data: log } = await req
+        .db!.from("task_emails")
+        .insert({
+          user_id: req.user!.id,
+          task_id: taskId,
+          provider_id: p.id,
+          to_email: p.email,
+          from_email: result.from,
+          subject,
+          body_text: text,
+          status: result.status,
+          provider_message_id: result.providerMessageId,
+          direction: "outbound",
+          thread_id: result.providerMessageId ?? null
+        })
+        .select()
+        .single();
+      if (log) sentLogs.push(log);
+      sent++;
+    } catch (err) {
+      skipped.push({
+        provider_id: p.id,
+        reason: err instanceof Error ? err.message : "send_failed"
+      });
+    }
+  }
+
+  // Status transitions: dispatching IS the approval, so move directly to
+  // waiting_on_provider (skip the intermediate 'approved' state).
+  await req
+    .db!.from("vehicle_tasks")
+    .update({
+      status: sent > 0 ? "waiting_on_provider" : "failed",
+      approved_at: new Date().toISOString()
+    })
+    .eq("id", taskId);
+
+  // Count this as ONE approved send for autonomy (not N — it was one user click).
+  let autonomy = await getAutonomyState(req.user!.id);
+  if (sent > 0) {
+    autonomy = await recordApprovedSend(
+      req.user!.id,
+      ((task as any).category as any) ?? "general"
+    );
+  }
+
+  await audit({
+    userId: req.user!.id,
+    taskId,
+    vehicleId: (task as any).vehicle_id,
+    eventType: "task_dispatched",
+    summary: `Dispatched to ${sent} provider${sent === 1 ? "" : "s"}${skipped.length ? `, ${skipped.length} skipped` : ""}${preferred_id ? ", preferred saved" : ""}`,
+    metadata: { sent, skipped, preferred_id }
+  });
+
+  return res.status(200).json({
+    sent,
+    skipped,
+    emails: sentLogs,
+    autonomy
+  });
 });
 
 // ---------- Helpers ----------

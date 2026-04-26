@@ -7,15 +7,19 @@ import {
   ChevronRight,
   Clock3,
   DollarSign,
+  ExternalLink,
   FileImage,
   Info,
   Loader2,
   Lock,
   Mail,
+  MapPin,
+  Phone,
   Plus,
   Send,
   ShieldCheck,
   Sparkles,
+  Star,
   TrendingUp,
   Wrench,
   X
@@ -25,6 +29,8 @@ import { isSupabaseConfigured, supabase } from "./supabase";
 import type {
   AutonomyStatus,
   Dashboard,
+  DispatchPayload,
+  DispatchProvider,
   Insight,
   MaintenanceItem,
   Provider,
@@ -158,6 +164,7 @@ function Product({ session }: { session: Session }) {
   const [openForm, setOpenForm] = useState<FormId | null>(null);
   const [actBusyKey, setActBusyKey] = useState<string | null>(null);
   const [initialLoaded, setInitialLoaded] = useState(false);
+  const [dispatch, setDispatch] = useState<DispatchPayload | null>(null);
 
   async function refresh() {
     setBusy(true);
@@ -203,12 +210,24 @@ function Product({ session }: { session: Session }) {
         navigate_to?: string;
         form_id?: string;
         recall_status?: string;
+        providers?: DispatchProvider[];
+        preferred_provider_id?: string | null;
+        email_preview?: { subject: string; body: string };
+        already_existed?: boolean;
       }>("/api/insights/act", {
         method: "POST",
         body: JSON.stringify({ insight_key: insight.key, vehicle_id: selectedId })
       });
 
-      if (result.action === "task_created" && result.task) {
+      if (result.action === "open_dispatch" && result.task && result.providers && result.email_preview) {
+        setDispatch({
+          task: result.task,
+          providers: result.providers,
+          preferred_provider_id: result.preferred_provider_id ?? null,
+          email_preview: result.email_preview,
+          already_existed: result.already_existed
+        });
+      } else if (result.action === "task_created" && result.task) {
         setHighlightTaskId(result.task.id);
         setTab("tasks");
         await refresh();
@@ -274,6 +293,18 @@ function Product({ session }: { session: Session }) {
           onSaved={() => {
             setOpenForm(null);
             void refresh();
+          }}
+        />
+      )}
+
+      {dispatch && (
+        <DispatchModal
+          payload={dispatch}
+          onClose={() => setDispatch(null)}
+          onSent={async () => {
+            setDispatch(null);
+            setTab("tasks");
+            await refresh();
           }}
         />
       )}
@@ -1223,6 +1254,262 @@ function ProviderOutreach({
         </div>
         {message && <div className="notice">{message}</div>}
       </details>
+    </div>
+  );
+}
+
+// ============================================================
+// DISPATCH MODAL (review email + pick dealers + send)
+// ============================================================
+function DispatchModal({
+  payload,
+  onClose,
+  onSent
+}: {
+  payload: DispatchPayload;
+  onClose: () => void;
+  onSent: () => void;
+}) {
+  const initialSelected = new Set(
+    payload.providers.filter((p) => Boolean(p.email)).map((p) => p.id)
+  );
+  const [selected, setSelected] = useState<Set<string>>(initialSelected);
+  const [preferredId, setPreferredId] = useState<string | null>(
+    payload.preferred_provider_id ?? null
+  );
+  const [editingEmailId, setEditingEmailId] = useState<string | null>(null);
+  const [emailOverrides, setEmailOverrides] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showEmailBody, setShowEmailBody] = useState(false);
+
+  function toggle(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function send() {
+    setBusy(true);
+    setError(null);
+    try {
+      const ids = Array.from(selected);
+      const overrides: Record<string, { email: string }> = {};
+      for (const [id, email] of Object.entries(emailOverrides)) {
+        if (email && selected.has(id)) overrides[id] = { email };
+      }
+      const result = await api<{ sent: number; skipped: any[] }>(
+        `/api/tasks/${payload.task.id}/dispatch`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            provider_ids: ids,
+            preferred_id: preferredId,
+            ...(Object.keys(overrides).length ? { overrides } : {})
+          })
+        }
+      );
+      if (result.sent === 0) {
+        setError("No emails were sent. Check that selected providers have valid email addresses.");
+        setBusy(false);
+        return;
+      }
+      onSent();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Dispatch failed.");
+      setBusy(false);
+    }
+  }
+
+  const sendableCount = Array.from(selected).filter((id) => {
+    const p = payload.providers.find((x) => x.id === id);
+    if (!p) return false;
+    const overridden = emailOverrides[id];
+    return Boolean(overridden ?? p.email);
+  }).length;
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal dispatch-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <h2>Reach out to dealers</h2>
+          <button className="ghost icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button>
+        </div>
+
+        <p className="small muted">
+          Automoteev will send this email to the dealers you select. You can swap any dealer,
+          edit the email it found, and pick which one becomes your preferred for next time.
+        </p>
+
+        {/* Email preview */}
+        <div className="email-preview">
+          <div className="email-preview-head">
+            <Mail size={16} />
+            <strong>Subject:</strong> <span>{payload.email_preview.subject}</span>
+          </div>
+          <button
+            className="ghost small"
+            type="button"
+            onClick={() => setShowEmailBody((v) => !v)}
+          >
+            {showEmailBody ? "Hide email" : "Show full email"}
+          </button>
+          {showEmailBody && (
+            <pre className="email-body">{payload.email_preview.body}</pre>
+          )}
+        </div>
+
+        {/* Dealer list */}
+        <div className="dealer-list">
+          <div className="dealer-list-head">
+            <strong>Dealers found ({payload.providers.length})</strong>
+            <span className="small muted">Tap a row to include or skip</span>
+          </div>
+          {payload.providers.length === 0 && (
+            <p className="muted small">
+              No dealers found near your ZIP. Add one manually under Tasks → Provider outreach.
+            </p>
+          )}
+          {payload.providers.map((p) => {
+            const isSelected = selected.has(p.id);
+            const isPreferred = preferredId === p.id;
+            const overrideEmail = emailOverrides[p.id];
+            const effectiveEmail = overrideEmail ?? p.email;
+            const emailIsBestGuess =
+              p.derived_email_basis === "best_guess" && !overrideEmail;
+            return (
+              <div
+                key={p.id}
+                className={`dealer-row ${isSelected ? "selected" : ""} ${isPreferred ? "preferred" : ""}`}
+              >
+                <button
+                  type="button"
+                  className="dealer-toggle"
+                  onClick={() => toggle(p.id)}
+                  aria-pressed={isSelected}
+                >
+                  <span className={`checkbox ${isSelected ? "checked" : ""}`}>
+                    {isSelected && <CheckCircle2 size={14} />}
+                  </span>
+                </button>
+                <div className="dealer-info">
+                  <div className="dealer-name">
+                    <strong>{p.name}</strong>
+                    {p.rating != null && (
+                      <span className="dealer-rating">
+                        <Star size={12} /> {p.rating.toFixed(1)}
+                        {p.rating_count != null && (
+                          <span className="muted"> ({p.rating_count})</span>
+                        )}
+                      </span>
+                    )}
+                  </div>
+                  {p.location && (
+                    <div className="dealer-meta">
+                      <MapPin size={12} /> <span className="small muted">{p.location}</span>
+                    </div>
+                  )}
+                  {p.phone && (
+                    <div className="dealer-meta">
+                      <Phone size={12} />{" "}
+                      <a href={`tel:${p.phone}`} className="small">{p.phone}</a>
+                    </div>
+                  )}
+                  <div className="dealer-meta dealer-email-row">
+                    <Mail size={12} />
+                    {editingEmailId === p.id ? (
+                      <input
+                        autoFocus
+                        type="email"
+                        defaultValue={effectiveEmail ?? ""}
+                        className="dealer-email-input"
+                        onBlur={(e) => {
+                          setEmailOverrides((prev) => ({ ...prev, [p.id]: e.target.value }));
+                          setEditingEmailId(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            (e.target as HTMLInputElement).blur();
+                          } else if (e.key === "Escape") {
+                            setEditingEmailId(null);
+                          }
+                        }}
+                      />
+                    ) : effectiveEmail ? (
+                      <span className="small">
+                        {effectiveEmail}
+                        {emailIsBestGuess && (
+                          <span className="email-guess-badge" title="Best guess from website domain">
+                            ?
+                          </span>
+                        )}
+                        <button
+                          className="ghost small inline-edit"
+                          type="button"
+                          onClick={() => setEditingEmailId(p.id)}
+                        >
+                          edit
+                        </button>
+                      </span>
+                    ) : (
+                      <span className="small muted">
+                        no email —
+                        <button
+                          className="ghost small inline-edit"
+                          type="button"
+                          onClick={() => setEditingEmailId(p.id)}
+                        >
+                          add one
+                        </button>
+                      </span>
+                    )}
+                  </div>
+                  {p.website && (
+                    <div className="dealer-meta">
+                      <ExternalLink size={12} />{" "}
+                      <a href={p.website} target="_blank" rel="noreferrer" className="small">
+                        Website
+                      </a>
+                    </div>
+                  )}
+                  <label className="preferred-radio small">
+                    <input
+                      type="radio"
+                      name="preferred"
+                      checked={isPreferred}
+                      onChange={() => setPreferredId(p.id)}
+                    />
+                    Set as my preferred dealer
+                  </label>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {error && <div className="error">{error}</div>}
+
+        <div className="button-row dispatch-actions">
+          <button
+            className="primary"
+            type="button"
+            onClick={send}
+            disabled={busy || sendableCount === 0}
+          >
+            {busy ? (
+              <><Loader2 size={16} className="spinner" /> Sending…</>
+            ) : (
+              <><Send size={16} /> Send to {sendableCount} dealer{sendableCount === 1 ? "" : "s"}</>
+            )}
+          </button>
+          <button className="ghost" type="button" onClick={onClose} disabled={busy}>
+            Not now
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
