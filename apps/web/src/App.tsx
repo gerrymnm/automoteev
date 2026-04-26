@@ -157,6 +157,7 @@ function Product({ session }: { session: Session }) {
   const [highlightTaskId, setHighlightTaskId] = useState<string | null>(null);
   const [openForm, setOpenForm] = useState<FormId | null>(null);
   const [actBusyKey, setActBusyKey] = useState<string | null>(null);
+  const [initialLoaded, setInitialLoaded] = useState(false);
 
   async function refresh() {
     setBusy(true);
@@ -182,6 +183,7 @@ function Product({ session }: { session: Session }) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
       setBusy(false);
+      setInitialLoaded(true);
     }
   }
 
@@ -236,6 +238,11 @@ function Product({ session }: { session: Session }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Don't decide between Onboarding vs Status until the first fetch completes —
+  // otherwise we briefly render Onboarding while the API call is in flight.
+  if (!initialLoaded) {
+    return <Shell><div className="panel"><Loader2 size={16} className="spinner" /> Loading your vehicle…</div></Shell>;
+  }
   if (!vehicles.length) {
     return <Shell><Onboarding onDone={refresh} email={session.user.email ?? ""} /></Shell>;
   }
