@@ -119,6 +119,9 @@ function AuthPanel() {
       <div className="intro">
         <div className="brand">Automoteev</div>
         <h1>Save money on your car. Without lifting a finger.</h1>
+        <p className="hero-sub-tagline">
+          Starting with your vehicle. Insurance, subscriptions, and recurring bills next.
+        </p>
         <p>
           Automoteev is the AI agent that watches your insurance, loan, and service costs,
           finds savings, requests quotes from real providers, and acts on your behalf. You
@@ -271,7 +274,7 @@ function Product({ session }: { session: Session }) {
       <header className="topbar">
         <div>
           <div className="brand">Automoteev</div>
-          <div className="muted small">Your AI vehicle agent</div>
+          <div className="muted small">Your AI agent for life's recurring expenses</div>
         </div>
         <nav className="tabs desktop-only" aria-label="Main">
           {(["status", "tasks", "command", "history", "settings"] as Tab[]).map((item) => (
@@ -1703,6 +1706,40 @@ function Settings({ autonomy }: { autonomy: AutonomyStatus | null }) {
         <p className="small muted">
           Every important action is logged. External sharing requires approval that names who may be
           contacted and which fields may be shared. Phone numbers are never disclosed in outbound email.
+        </p>
+      </div>
+
+      <div className="panel coming-next">
+        <h2>Coming next</h2>
+        <p className="small muted">
+          Automoteev's mission is to handle your recurring expenses, end to end. Your vehicle
+          is the first one we tackle. Here's what's next on the roadmap.
+        </p>
+        <ul className="coming-next-list">
+          <li>
+            <ShieldCheck size={16} />
+            <div>
+              <strong>Home, life, and renters insurance</strong>
+              <span className="small muted">Same shop-and-save loop, applied to every policy you carry.</span>
+            </div>
+          </li>
+          <li>
+            <DollarSign size={16} />
+            <div>
+              <strong>Subscription audits</strong>
+              <span className="small muted">Catches the streaming, software, and gym charges you forgot you signed up for.</span>
+            </div>
+          </li>
+          <li>
+            <TrendingUp size={16} />
+            <div>
+              <strong>Recurring bill optimization</strong>
+              <span className="small muted">Internet, mobile, energy — negotiate or switch when better deals appear.</span>
+            </div>
+          </li>
+        </ul>
+        <p className="small muted coming-next-vote">
+          Want to vote on what we ship first? Reply to any Automoteev email with the category you want.
         </p>
       </div>
     </section>

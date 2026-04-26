@@ -473,6 +473,58 @@ label.checkbox-row a {
   100% { box-shadow: 0 0 0 3px rgba(23, 107, 93, 0.18); }
 }
 
+/* ---------- Hero sub-tagline (auth screen) ---------- */
+.hero-sub-tagline {
+  font-size: 14px;
+  color: #4d5a53;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  margin: -8px 0 16px 0;
+  padding: 6px 12px;
+  background: rgba(212, 168, 79, 0.12);
+  border-left: 3px solid #d5a84f;
+  border-radius: 4px;
+  display: inline-block;
+}
+
+/* ---------- "Coming next" panel (Settings) ---------- */
+.coming-next-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0 0;
+  display: grid;
+  gap: 10px;
+}
+.coming-next-list li {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 12px;
+  background: #fbfcfa;
+  border: 1px solid #e1e6dd;
+  border-radius: 8px;
+}
+.coming-next-list li > svg {
+  flex-shrink: 0;
+  color: #176b5d;
+  margin-top: 2px;
+}
+.coming-next-list li > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.coming-next-list li strong {
+  font-size: 14px;
+  color: #1f2a25;
+}
+.coming-next-vote {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed #dce2d8;
+  font-style: italic;
+}
+
 /* ---------- Dispatch Modal ---------- */
 .dispatch-modal { max-width: 640px; }
 .email-preview {
