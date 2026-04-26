@@ -212,6 +212,7 @@ async function callTool(userId: string, toolName: string, args: Record<string, u
       const vehicleId = (args.vehicle_id as string) ?? (await defaultVehicleId(userId));
       if (!vehicleId) return { error: "no vehicle on file" };
       const dashboard = await buildDashboardData(userId, vehicleId);
+      if ("error" in dashboard) return dashboard;
       return { recommendations: dashboard.insights };
     }
 
@@ -230,6 +231,7 @@ async function callTool(userId: string, toolName: string, args: Record<string, u
 
       // Generate insights and find the matching one
       const dashboard = await buildDashboardData(userId, vehicleId);
+      if ("error" in dashboard) return dashboard;
       const insight = dashboard.insights.find((i: any) => i.key === insightKey);
       if (!insight) return { error: "insight not found in current recommendations" };
       if (insight.action.type !== "create_task") {
