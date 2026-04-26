@@ -287,7 +287,7 @@ async function buildDashboardData(userId: string, vehicleId: string) {
     .maybeSingle();
   if (!vehicle) return { error: "vehicle not found" };
 
-  const [costProfile, loanLease, insurance, maintItems, recalls, providers, fuel] = await Promise.all([
+  const [costProfile, loanLease, insurance, maintItems, recalls, providers, fuel, activeTasks] = await Promise.all([
     supabaseAdmin.from("vehicle_cost_profiles").select("*").eq("vehicle_id", vehicleId).maybeSingle(),
     supabaseAdmin.from("loan_lease_accounts").select("*").eq("vehicle_id", vehicleId).maybeSingle(),
     supabaseAdmin.from("insurance_accounts").select("*").eq("vehicle_id", vehicleId).maybeSingle(),
@@ -299,7 +299,12 @@ async function buildDashboardData(userId: string, vehicleId: string) {
       .select("entry_date")
       .eq("vehicle_id", vehicleId)
       .order("entry_date", { ascending: false })
-      .limit(1)
+      .limit(1),
+    supabaseAdmin
+      .from("vehicle_tasks")
+      .select("task_type")
+      .eq("vehicle_id", vehicleId)
+      .in("status", ["needs_user_approval", "approved", "in_progress", "waiting_on_provider"])
   ]);
 
   const lastShoppedAt = (insurance.data as any)?.last_shopped_at;
@@ -318,7 +323,8 @@ async function buildDashboardData(userId: string, vehicleId: string) {
       : null,
     daysSinceLastInsuranceShop: lastShoppedAt
       ? Math.floor((Date.now() - new Date(lastShoppedAt).getTime()) / 86_400_000)
-      : null
+      : null,
+    activeTaskTypes: new Set((activeTasks.data ?? []).map((t: any) => t.task_type))
   });
 
   return {

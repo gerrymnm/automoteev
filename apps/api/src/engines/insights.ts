@@ -76,6 +76,13 @@ export interface InsightInput {
   preferredServiceShopExists: boolean;
   monthsSinceLastFuelEntry: number | null;
   daysSinceLastInsuranceShop: number | null;
+  /**
+   * Set of task_type strings already active for this vehicle
+   * (status in needs_user_approval/approved/in_progress/waiting_on_provider).
+   * When present, suppresses any create_task insight whose task_type matches.
+   * Prevents the "tap a recommendation twice → two tasks" bug.
+   */
+  activeTaskTypes?: Set<string>;
 }
 
 export function generateInsights(input: InsightInput): Insight[] {
@@ -323,9 +330,18 @@ export function generateInsights(input: InsightInput): Insight[] {
     });
   }
 
-  // Always at least ONE thing
-  if (list.length === 0) {
-    list.push({
+  // Suppress task-creating insights when an active task of the same type
+  // already exists. Keeps the recommendation list clean once a workflow is in flight.
+  const activeTypes = input.activeTaskTypes ?? new Set<string>();
+  const filtered = list.filter((i) => {
+    if (i.action.type !== "create_task") return true;
+    const tt = i.action.task_type;
+    return !(tt && activeTypes.has(tt));
+  });
+
+  // Always at least ONE thing — apply AFTER filtering
+  if (filtered.length === 0) {
+    filtered.push({
       key: "all_good_value_check",
       category: "general",
       severity: "info",
@@ -336,7 +352,7 @@ export function generateInsights(input: InsightInput): Insight[] {
     });
   }
 
-  return list.sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
+  return filtered.sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
 }
 
 export function statusFromInsights(insights: Insight[]): OverallStatus {

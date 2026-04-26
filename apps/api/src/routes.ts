@@ -380,7 +380,8 @@ router.get("/api/vehicles/:id/dashboard", async (req, res) => {
     maintRes,
     recallsRes,
     providersRes,
-    fuelRes
+    fuelRes,
+    activeTasksRes
   ] = await Promise.all([
     one(req.db!.from("vehicle_cost_profiles").select("*").eq("vehicle_id", vehicleId)),
     one(req.db!.from("loan_lease_accounts").select("*").eq("vehicle_id", vehicleId)),
@@ -406,7 +407,12 @@ router.get("/api/vehicles/:id/dashboard", async (req, res) => {
       .select("entry_date")
       .eq("vehicle_id", vehicleId)
       .order("entry_date", { ascending: false })
-      .limit(1)
+      .limit(1),
+    req
+      .db!.from("vehicle_tasks")
+      .select("task_type")
+      .eq("vehicle_id", vehicleId)
+      .in("status", ["needs_user_approval", "approved", "in_progress", "waiting_on_provider"])
   ]);
 
   // Generate insights inline so the user always sees the freshest list.
@@ -428,7 +434,8 @@ router.get("/api/vehicles/:id/dashboard", async (req, res) => {
     openRecallCount: (recallsRes.data ?? []).length,
     preferredServiceShopExists: (providersRes.data ?? []).length > 0,
     monthsSinceLastFuelEntry,
-    daysSinceLastInsuranceShop
+    daysSinceLastInsuranceShop,
+    activeTaskTypes: new Set((activeTasksRes.data ?? []).map((t: any) => t.task_type))
   });
   const overallStatus = statusFromInsights(insights);
 
@@ -1302,7 +1309,7 @@ router.post("/api/insights/act", async (req, res) => {
   );
   if (!vehicle) return res.status(404).json({ error: "Vehicle not found" });
 
-  const [costProfile, loanLease, insurance, maintRes, recallsRes, providersRes, fuelRes] =
+  const [costProfile, loanLease, insurance, maintRes, recallsRes, providersRes, fuelRes, activeTasksRes] =
     await Promise.all([
       one(req.db!.from("vehicle_cost_profiles").select("*").eq("vehicle_id", vehicle_id)),
       one(req.db!.from("loan_lease_accounts").select("*").eq("vehicle_id", vehicle_id)),
@@ -1315,7 +1322,12 @@ router.post("/api/insights/act", async (req, res) => {
         .select("entry_date")
         .eq("vehicle_id", vehicle_id)
         .order("entry_date", { ascending: false })
-        .limit(1)
+        .limit(1),
+      req
+        .db!.from("vehicle_tasks")
+        .select("task_type")
+        .eq("vehicle_id", vehicle_id)
+        .in("status", ["needs_user_approval", "approved", "in_progress", "waiting_on_provider"])
     ]);
 
   const lastShoppedAt = (insurance as any)?.last_shopped_at;
@@ -1334,7 +1346,8 @@ router.post("/api/insights/act", async (req, res) => {
       : null,
     daysSinceLastInsuranceShop: lastShoppedAt
       ? Math.floor((Date.now() - new Date(lastShoppedAt).getTime()) / 86_400_000)
-      : null
+      : null,
+    activeTaskTypes: new Set((activeTasksRes.data ?? []).map((t: any) => t.task_type))
   });
 
   const insight = insights.find((i) => i.key === insight_key);
@@ -1344,12 +1357,36 @@ router.post("/api/insights/act", async (req, res) => {
 
   // Branch by action type
   if (insight.action.type === "create_task") {
+    const taskType = insight.action.task_type ?? "general";
+
+    // Idempotency: if an active task of this type already exists for this
+    // vehicle, return it instead of creating a duplicate. Prevents the
+    // "tap a recommendation twice → two tasks" bug.
+    const existingActive = await one(
+      req
+        .db!.from("vehicle_tasks")
+        .select("*")
+        .eq("vehicle_id", vehicle_id)
+        .eq("task_type", taskType)
+        .in("status", ["needs_user_approval", "approved", "in_progress", "waiting_on_provider"])
+        .order("created_at", { ascending: false })
+        .limit(1)
+    );
+    if (existingActive) {
+      return res.status(200).json({
+        action: "task_created",
+        task: existingActive,
+        navigate_to: `/tasks/${(existingActive as any).id}`,
+        already_existed: true
+      });
+    }
+
     const { data: task, error } = await req
       .db!.from("vehicle_tasks")
       .insert({
         user_id: req.user!.id,
         vehicle_id,
-        task_type: insight.action.task_type ?? "general",
+        task_type: taskType,
         category: insight.category,
         title: insight.action.task_title ?? insight.title,
         description: insight.body,
