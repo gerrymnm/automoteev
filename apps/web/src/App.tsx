@@ -1,12 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import {
   AlertTriangle,
+  Camera,
   CheckCircle2,
   ChevronRight,
   Clock3,
   DollarSign,
+  FileImage,
   Info,
+  Loader2,
   Lock,
   Mail,
   Plus,
@@ -14,7 +17,8 @@ import {
   ShieldCheck,
   Sparkles,
   TrendingUp,
-  Wrench
+  Wrench,
+  X
 } from "lucide-react";
 import { api, money, moneyRange, vehicleName } from "./api";
 import { isSupabaseConfigured, supabase } from "./supabase";
@@ -22,17 +26,17 @@ import type {
   AutonomyStatus,
   Dashboard,
   Insight,
-  InsightSeverity,
   MaintenanceItem,
-  OnboardingPrompt,
   Provider,
   RecallRecord,
   SubscriptionStatus,
   Task,
+  UploadedDocument,
   Vehicle
 } from "./types";
 
 type Tab = "status" | "tasks" | "command" | "history" | "settings";
+type FormId = "insurance" | "loan" | "fuel" | "preferred_shop";
 
 export function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -53,99 +57,9 @@ export function App() {
   return <Product session={session} />;
 }
 
-function Product({ session }: { session: Session }) {
-  const [tab, setTab] = useState<Tab>("status");
-  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [dashboard, setDashboard] = useState<Dashboard | null>(null);
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [providers, setProviders] = useState<Provider[]>([]);
-  const [autonomy, setAutonomy] = useState<AutonomyStatus | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function refresh() {
-    setBusy(true);
-    setError(null);
-    try {
-      const vehicleResponse = await api<{ vehicles: Vehicle[] }>("/api/vehicles");
-      setVehicles(vehicleResponse.vehicles);
-      const nextId = selectedId ?? vehicleResponse.vehicles[0]?.id ?? null;
-      setSelectedId(nextId);
-      if (nextId) {
-        const [dash, taskResponse, providerResponse, autonomyResponse] = await Promise.all([
-          api<Dashboard>(`/api/vehicles/${nextId}/dashboard`),
-          api<{ tasks: Task[] }>("/api/tasks"),
-          api<{ providers: Provider[] }>("/api/providers"),
-          api<AutonomyStatus>("/api/autonomy/status")
-        ]);
-        setDashboard(dash);
-        setTasks(taskResponse.tasks);
-        setProviders(providerResponse.providers);
-        setAutonomy(autonomyResponse);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  useEffect(() => {
-    void refresh();
-    // poll dashboard every 30s so background recall lookup / value refresh shows up
-    const id = setInterval(() => {
-      if (selectedId) {
-        api<Dashboard>(`/api/vehicles/${selectedId}/dashboard`)
-          .then(setDashboard)
-          .catch(() => undefined);
-      }
-    }, 30_000);
-    return () => clearInterval(id);
-  }, []);
-
-  if (!vehicles.length) {
-    return <Shell><Onboarding onDone={refresh} email={session.user.email ?? ""} /></Shell>;
-  }
-
-  return (
-    <Shell>
-      <header className="topbar">
-        <div>
-          <div className="brand">Automoteev</div>
-          <div className="muted small">Your AI vehicle agent</div>
-        </div>
-        <nav className="tabs" aria-label="Main">
-          {(["status", "tasks", "command", "history", "settings"] as Tab[]).map((item) => (
-            <button className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>
-              {item}
-            </button>
-          ))}
-        </nav>
-      </header>
-
-      {error && <div className="notice error-notice">{error}</div>}
-      {busy && <div className="thin-status">Syncing vehicle data…</div>}
-
-      {tab === "status" && dashboard && (
-        <Status dashboard={dashboard} onRefresh={refresh} onJump={(t) => setTab(t)} />
-      )}
-      {tab === "tasks" && dashboard && (
-        <TaskCenter
-          dashboard={dashboard}
-          tasks={tasks}
-          providers={providers}
-          autonomy={autonomy}
-          onRefresh={refresh}
-        />
-      )}
-      {tab === "command" && selectedId && <Command vehicleId={selectedId} onCreated={refresh} />}
-      {tab === "history" && <History tasks={tasks} />}
-      {tab === "settings" && <Settings autonomy={autonomy} />}
-    </Shell>
-  );
-}
-
+// ============================================================
+// Shell + auth
+// ============================================================
 function Shell({ children }: { children: React.ReactNode }) {
   return <main className="app-shell">{children}</main>;
 }
@@ -227,6 +141,186 @@ function AuthPanel() {
   );
 }
 
+// ============================================================
+// Product (signed in)
+// ============================================================
+function Product({ session }: { session: Session }) {
+  const [tab, setTab] = useState<Tab>("status");
+  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [dashboard, setDashboard] = useState<Dashboard | null>(null);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [providers, setProviders] = useState<Provider[]>([]);
+  const [autonomy, setAutonomy] = useState<AutonomyStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [highlightTaskId, setHighlightTaskId] = useState<string | null>(null);
+  const [openForm, setOpenForm] = useState<FormId | null>(null);
+  const [actBusyKey, setActBusyKey] = useState<string | null>(null);
+
+  async function refresh() {
+    setBusy(true);
+    setError(null);
+    try {
+      const vehicleResponse = await api<{ vehicles: Vehicle[] }>("/api/vehicles");
+      setVehicles(vehicleResponse.vehicles);
+      const nextId = selectedId ?? vehicleResponse.vehicles[0]?.id ?? null;
+      setSelectedId(nextId);
+      if (nextId) {
+        const [dash, taskResponse, providerResponse, autonomyResponse] = await Promise.all([
+          api<Dashboard>(`/api/vehicles/${nextId}/dashboard`),
+          api<{ tasks: Task[] }>("/api/tasks"),
+          api<{ providers: Provider[] }>("/api/providers"),
+          api<AutonomyStatus>("/api/autonomy/status")
+        ]);
+        setDashboard(dash);
+        setTasks(taskResponse.tasks);
+        setProviders(providerResponse.providers);
+        setAutonomy(autonomyResponse);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * Two-tap flow (Option A): Tap a recommendation → backend creates a
+   * needs_user_approval task → we navigate to Tasks tab → user taps Approve.
+   * For "completeness" gaps, we open an inline form modal instead.
+   * For "run_recall_check" we run it inline and refresh.
+   */
+  async function actOnInsight(insight: Insight) {
+    if (!selectedId) return;
+    setActBusyKey(insight.key);
+    try {
+      const result = await api<{
+        action: string;
+        task?: Task;
+        navigate_to?: string;
+        form_id?: string;
+        recall_status?: string;
+      }>("/api/insights/act", {
+        method: "POST",
+        body: JSON.stringify({ insight_key: insight.key, vehicle_id: selectedId })
+      });
+
+      if (result.action === "task_created" && result.task) {
+        setHighlightTaskId(result.task.id);
+        setTab("tasks");
+        await refresh();
+      } else if (result.action === "open_form" && result.form_id) {
+        setOpenForm(result.form_id as FormId);
+      } else if (result.action === "recall_check_run") {
+        await refresh();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not act on recommendation.");
+    } finally {
+      setActBusyKey(null);
+    }
+  }
+
+  useEffect(() => {
+    void refresh();
+    // poll dashboard every 30s so background recall lookup / value refresh shows up
+    const id = setInterval(() => {
+      if (selectedId) {
+        api<Dashboard>(`/api/vehicles/${selectedId}/dashboard`)
+          .then(setDashboard)
+          .catch(() => undefined);
+      }
+    }, 30_000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (!vehicles.length) {
+    return <Shell><Onboarding onDone={refresh} email={session.user.email ?? ""} /></Shell>;
+  }
+
+  return (
+    <Shell>
+      <header className="topbar">
+        <div>
+          <div className="brand">Automoteev</div>
+          <div className="muted small">Your AI vehicle agent</div>
+        </div>
+        <nav className="tabs desktop-only" aria-label="Main">
+          {(["status", "tasks", "command", "history", "settings"] as Tab[]).map((item) => (
+            <button className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>
+              {item}
+            </button>
+          ))}
+        </nav>
+      </header>
+
+      {error && <div className="notice error-notice">{error}</div>}
+      {busy && <div className="thin-status"><Loader2 size={16} className="spinner" /> Syncing vehicle data…</div>}
+
+      {openForm && selectedId && (
+        <InlineFormModal
+          formId={openForm}
+          vehicleId={selectedId}
+          onClose={() => setOpenForm(null)}
+          onSaved={() => {
+            setOpenForm(null);
+            void refresh();
+          }}
+        />
+      )}
+
+      {tab === "status" && dashboard && selectedId && (
+        <Status
+          dashboard={dashboard}
+          vehicleId={selectedId}
+          onRefresh={refresh}
+          onActOnInsight={actOnInsight}
+          actBusyKey={actBusyKey}
+        />
+      )}
+      {tab === "tasks" && dashboard && (
+        <TaskCenter
+          dashboard={dashboard}
+          tasks={tasks}
+          providers={providers}
+          autonomy={autonomy}
+          highlightTaskId={highlightTaskId}
+          onActOnInsight={actOnInsight}
+          actBusyKey={actBusyKey}
+          onRefresh={refresh}
+        />
+      )}
+      {tab === "command" && selectedId && <Command vehicleId={selectedId} onCreated={refresh} />}
+      {tab === "history" && <History tasks={tasks} />}
+      {tab === "settings" && <Settings autonomy={autonomy} />}
+
+      {/* Mobile bottom nav */}
+      <nav className="bottom-nav mobile-only" aria-label="Main">
+        {(["status", "tasks", "command", "history", "settings"] as Tab[]).map((item) => (
+          <button className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>
+            <BottomNavIcon tab={item} />
+            <span>{item}</span>
+          </button>
+        ))}
+      </nav>
+    </Shell>
+  );
+}
+
+function BottomNavIcon({ tab }: { tab: Tab }) {
+  const sz = 18;
+  if (tab === "status") return <CheckCircle2 size={sz} />;
+  if (tab === "tasks") return <Wrench size={sz} />;
+  if (tab === "command") return <Send size={sz} />;
+  if (tab === "history") return <Clock3 size={sz} />;
+  return <Lock size={sz} />;
+}
+
+// ============================================================
+// Onboarding (minimal, document upload comes after)
+// ============================================================
 function Onboarding({ onDone, email }: { onDone: () => void; email: string }) {
   const [form, setForm] = useState({
     full_name: "",
@@ -234,16 +328,7 @@ function Onboarding({ onDone, email }: { onDone: () => void; email: string }) {
     zip_code: "",
     vin: "",
     mileage: "",
-    ownership_type: "owned",
-    monthly_payment_cents: "",
-    apr_percent: "",
-    lender_name: "",
-    loan_lease_balance_cents: "",
-    term_months: "",
-    lease_maturity_date: "",
-    insurance_carrier: "",
-    insurance_premium_cents: "",
-    insurance_renewal_date: ""
+    ownership_type: "owned"
   });
   const [consents, setConsents] = useState({
     reserve_obd: true,
@@ -279,8 +364,8 @@ function Onboarding({ onDone, email }: { onDone: () => void; email: string }) {
     <form className="panel onboarding" onSubmit={submit}>
       <h1>Set up your vehicle</h1>
       <p className="muted">
-        VIN, mileage, name, and email are required. Everything else is optional — the more
-        you share, the more savings Automoteev can find.
+        Just the basics for now. After this, you can snap a photo of your insurance dec page
+        or loan statement and Automoteev will fill in the details automatically.
       </p>
 
       <h3 className="section-head">Who you are</h3>
@@ -303,23 +388,6 @@ function Onboarding({ onDone, email }: { onDone: () => void; email: string }) {
         </label>
       </div>
 
-      <h3 className="section-head">Loan or lease <span className="muted">(optional)</span></h3>
-      <div className="form-grid">
-        <Field label="Lender" value={form.lender_name} onChange={(v) => setForm({ ...form, lender_name: v })} />
-        <Field label="Monthly payment" value={form.monthly_payment_cents} onChange={(v) => setForm({ ...form, monthly_payment_cents: v })} money />
-        <Field label="Current balance" value={form.loan_lease_balance_cents} onChange={(v) => setForm({ ...form, loan_lease_balance_cents: v })} money />
-        <Field label="APR (%)" value={form.apr_percent} onChange={(v) => setForm({ ...form, apr_percent: v })} decimal placeholder="e.g. 6.49" />
-        <Field label="Term (months)" value={form.term_months} onChange={(v) => setForm({ ...form, term_months: v })} />
-        <Field label="Lease maturity date" value={form.lease_maturity_date} onChange={(v) => setForm({ ...form, lease_maturity_date: v })} type="date" />
-      </div>
-
-      <h3 className="section-head">Insurance <span className="muted">(optional)</span></h3>
-      <div className="form-grid">
-        <Field label="Carrier" value={form.insurance_carrier} onChange={(v) => setForm({ ...form, insurance_carrier: v })} />
-        <Field label="Monthly premium" value={form.insurance_premium_cents} onChange={(v) => setForm({ ...form, insurance_premium_cents: v })} money />
-        <Field label="Renewal date" value={form.insurance_renewal_date} onChange={(v) => setForm({ ...form, insurance_renewal_date: v })} type="date" />
-      </div>
-
       <div className="consent-block">
         <label className="checkbox-row">
           <input type="checkbox" checked={consents.reserve_obd} onChange={(e) => setConsents({ ...consents, reserve_obd: e.target.checked })} />
@@ -336,9 +404,9 @@ function Onboarding({ onDone, email }: { onDone: () => void; email: string }) {
         <label className="checkbox-row">
           <input type="checkbox" checked={consents.accepted_autonomy_consent} onChange={(e) => setConsents({ ...consents, accepted_autonomy_consent: e.target.checked })} required />
           <span>
-            I authorize Automoteev to contact providers on my behalf. The first 3 outbound emails
-            require my approval; after that, Automoteev may send autonomously for tasks I have
-            approved. I can revoke autonomy at any time from Settings.
+            I authorize Automoteev to contact providers on my behalf. Levels progress as I approve actions:
+            Level 1 (Assisted) asks every time, Level 2 (Trusted) allows repeats, Level 3 (Autonomous) acts
+            on approved categories. I can revoke autonomy at any time from Settings.
           </span>
         </label>
       </div>
@@ -352,16 +420,20 @@ function Onboarding({ onDone, email }: { onDone: () => void; email: string }) {
 }
 
 // ============================================================
-// STATUS TAB — hero, recommended action, vehicle facts
+// STATUS TAB
 // ============================================================
 function Status({
   dashboard,
+  vehicleId,
   onRefresh,
-  onJump
+  onActOnInsight,
+  actBusyKey
 }: {
   dashboard: Dashboard;
+  vehicleId: string;
   onRefresh: () => void;
-  onJump: (t: Tab) => void;
+  onActOnInsight: (insight: Insight) => void;
+  actBusyKey: string | null;
 }) {
   const status = dashboard.vehicle.overall_status;
   const statusColor = status === "all_good" ? "green" : status === "action_needed" ? "red" : "yellow";
@@ -375,7 +447,7 @@ function Status({
         <div className="status-head">
           <div>
             <p className="muted small">Your vehicle</p>
-            <h1>{vehicleName(dashboard.vehicle)}</h1>
+            <h1 className="vehicle-title">{vehicleName(dashboard.vehicle)}</h1>
             <p className="muted small">VIN {dashboard.vehicle.vin} · {dashboard.vehicle.mileage.toLocaleString()} mi</p>
           </div>
           <span className={`status-pill status-pill-${statusColor}`}>
@@ -388,7 +460,7 @@ function Status({
             <TrendingUp size={20} />
             <div>
               <strong>Automoteev sees ~${totalSavings.toLocaleString()}/yr in potential savings</strong>
-              <p className="small muted">Based on the recommendations below. Approve any to let Automoteev pursue them.</p>
+              <p className="small muted">Tap a recommendation to let Automoteev pursue it.</p>
             </div>
           </div>
         )}
@@ -396,7 +468,8 @@ function Status({
         {dashboard.recommended_action && (
           <RecommendedAction
             insight={dashboard.recommended_action}
-            onTake={() => onJump("tasks")}
+            onAct={() => onActOnInsight(dashboard.recommended_action!)}
+            busy={actBusyKey === dashboard.recommended_action.key}
           />
         )}
 
@@ -425,15 +498,18 @@ function Status({
         </div>
 
         {dashboard.open_recalls.length > 0 && <RecallList recalls={dashboard.open_recalls} />}
+        {dashboard.maintenance_items.length > 0 && <MaintenanceList items={dashboard.maintenance_items} />}
 
-        {dashboard.maintenance_items.length > 0 && (
-          <MaintenanceList items={dashboard.maintenance_items} />
-        )}
+        <DocumentDropZone vehicleId={vehicleId} onComplete={onRefresh} />
       </div>
 
       <aside className="side-panel">
         {otherInsights.length > 0 && (
-          <ImprovementsPanel insights={otherInsights} onJump={() => onJump("tasks")} />
+          <ImprovementsPanel
+            insights={otherInsights}
+            onAct={onActOnInsight}
+            actBusyKey={actBusyKey}
+          />
         )}
         <button className="primary refresh-button" onClick={onRefresh}>
           <Clock3 size={18} /> Refresh vehicle status
@@ -446,7 +522,15 @@ function Status({
   );
 }
 
-function RecommendedAction({ insight, onTake }: { insight: Insight; onTake: () => void }) {
+function RecommendedAction({
+  insight,
+  onAct,
+  busy
+}: {
+  insight: Insight;
+  onAct: () => void;
+  busy: boolean;
+}) {
   const tone =
     insight.severity === "urgent"
       ? "rec-urgent"
@@ -454,20 +538,31 @@ function RecommendedAction({ insight, onTake }: { insight: Insight; onTake: () =
       ? "rec-recommended"
       : "rec-info";
   return (
-    <button className={`recommended-action ${tone}`} onClick={onTake}>
+    <button className={`recommended-action ${tone}`} onClick={onAct} disabled={busy}>
       <div className="rec-icon">
-        {insight.severity === "urgent" ? <AlertTriangle size={20} /> : insight.category === "savings" ? <DollarSign size={20} /> : <Sparkles size={20} />}
+        {busy ? <Loader2 size={20} className="spinner" /> :
+          insight.severity === "urgent" ? <AlertTriangle size={20} /> :
+          insight.category === "insurance" || insight.category === "lending" ? <DollarSign size={20} /> :
+          <Sparkles size={20} />}
       </div>
       <div className="rec-body">
         <div className="rec-title">{insight.title}</div>
         <div className="rec-text">{insight.body}</div>
-        <div className="rec-cta">{insight.cta_label} <ChevronRight size={16} /></div>
+        <div className="rec-cta">{busy ? "Working…" : insight.cta_label} <ChevronRight size={16} /></div>
       </div>
     </button>
   );
 }
 
-function ImprovementsPanel({ insights, onJump }: { insights: Insight[]; onJump: () => void }) {
+function ImprovementsPanel({
+  insights,
+  onAct,
+  actBusyKey
+}: {
+  insights: Insight[];
+  onAct: (i: Insight) => void;
+  actBusyKey: string | null;
+}) {
   return (
     <div className="panel improvements">
       <div className="improvements-head">
@@ -477,12 +572,12 @@ function ImprovementsPanel({ insights, onJump }: { insights: Insight[]; onJump: 
       <ul className="improvements-list">
         {insights.map((i) => (
           <li key={i.key}>
-            <button onClick={onJump} className={`imp-item imp-${i.severity}`}>
+            <button onClick={() => onAct(i)} disabled={actBusyKey === i.key} className={`imp-item imp-${i.severity}`}>
               <span className="imp-title">{i.title}</span>
               {i.estimated_savings_usd_per_year ? (
                 <span className="imp-savings">~${i.estimated_savings_usd_per_year}/yr</span>
               ) : null}
-              <ChevronRight size={14} className="imp-chev" />
+              {actBusyKey === i.key ? <Loader2 size={14} className="spinner imp-chev" /> : <ChevronRight size={14} className="imp-chev" />}
             </button>
           </li>
         ))}
@@ -531,19 +626,351 @@ function MaintenanceList({ items }: { items: MaintenanceItem[] }) {
 }
 
 // ============================================================
-// TASKS TAB — recommendations + active work + provider outreach
+// Document Drop Zone (image capture for dec page / loan statement)
+// ============================================================
+function DocumentDropZone({ vehicleId, onComplete }: { vehicleId: string; onComplete: () => void }) {
+  const [uploading, setUploading] = useState<"insurance_dec_page" | "loan_statement" | null>(null);
+  const [pending, setPending] = useState<UploadedDocument | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const insuranceInputRef = useRef<HTMLInputElement>(null);
+  const loanInputRef = useRef<HTMLInputElement>(null);
+
+  async function uploadAndExtract(file: File, kind: "insurance_dec_page" | "loan_statement") {
+    setUploading(kind);
+    setError(null);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("document_kind", kind);
+      formData.append("vehicle_id", vehicleId);
+
+      const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:4000";
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) throw new Error("Not signed in");
+      const res = await fetch(`${apiUrl}/api/documents`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || "Upload failed");
+      }
+      const result = (await res.json()) as { document: UploadedDocument };
+      setPending(result.document);
+
+      // Poll for extraction completion
+      const docId = result.document.id;
+      let attempts = 0;
+      const poll = setInterval(async () => {
+        attempts++;
+        try {
+          const status = await api<{ document: UploadedDocument }>(`/api/documents/${docId}`);
+          if (status.document.extraction_status === "completed") {
+            clearInterval(poll);
+            setPending(status.document);
+          } else if (status.document.extraction_status === "failed") {
+            clearInterval(poll);
+            setPending(status.document);
+            setError(status.document.extraction_error ?? "Extraction failed");
+          }
+          if (attempts > 30) clearInterval(poll);
+        } catch {
+          // ignore transient
+        }
+      }, 2_000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Upload failed");
+      setUploading(null);
+    }
+  }
+
+  async function applyExtracted() {
+    if (!pending) return;
+    try {
+      await api(`/api/documents/${pending.id}/apply`, {
+        method: "POST",
+        body: JSON.stringify({ vehicle_id: vehicleId })
+      });
+      setPending(null);
+      setUploading(null);
+      onComplete();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Apply failed");
+    }
+  }
+
+  return (
+    <div className="sub-panel">
+      <h3>Snap a photo, Automoteev fills it in</h3>
+      <p className="small muted">No typing. Take a picture of your dec page or loan statement and Automoteev pulls out the details.</p>
+
+      <div className="upload-cards">
+        <button
+          type="button"
+          className="upload-card"
+          onClick={() => insuranceInputRef.current?.click()}
+          disabled={uploading !== null}
+        >
+          {uploading === "insurance_dec_page" ? <Loader2 size={26} className="spinner" /> : <Camera size={26} />}
+          <strong>Insurance dec page</strong>
+          <span className="small muted">Carrier, premium, coverage, renewal</span>
+        </button>
+        <input
+          ref={insuranceInputRef}
+          type="file"
+          accept="image/*,application/pdf"
+          capture="environment"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void uploadAndExtract(f, "insurance_dec_page");
+          }}
+        />
+
+        <button
+          type="button"
+          className="upload-card"
+          onClick={() => loanInputRef.current?.click()}
+          disabled={uploading !== null}
+        >
+          {uploading === "loan_statement" ? <Loader2 size={26} className="spinner" /> : <FileImage size={26} />}
+          <strong>Loan statement</strong>
+          <span className="small muted">Lender, balance, APR, payment</span>
+        </button>
+        <input
+          ref={loanInputRef}
+          type="file"
+          accept="image/*,application/pdf"
+          capture="environment"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void uploadAndExtract(f, "loan_statement");
+          }}
+        />
+      </div>
+
+      {pending && pending.extraction_status === "processing" && (
+        <div className="notice"><Loader2 size={16} className="spinner" /> Reading your document…</div>
+      )}
+
+      {pending && pending.extraction_status === "completed" && pending.extracted_data && (
+        <div className="extraction-preview">
+          <strong>Found:</strong>
+          <ul className="small">
+            {Object.entries(pending.extracted_data)
+              .filter(([_, v]) => v !== null && v !== undefined && v !== "")
+              .slice(0, 8)
+              .map(([k, v]) => (
+                <li key={k}><span className="muted">{k.replaceAll("_", " ")}:</span> {String(v)}</li>
+              ))}
+          </ul>
+          <div className="button-row">
+            <button className="primary" type="button" onClick={applyExtracted}>
+              <CheckCircle2 size={16} /> Apply to my profile
+            </button>
+            <button className="ghost" type="button" onClick={() => { setPending(null); setUploading(null); }}>
+              Discard
+            </button>
+          </div>
+        </div>
+      )}
+
+      {error && <div className="error">{error}</div>}
+    </div>
+  );
+}
+
+// ============================================================
+// Inline Form Modal (for "completeness" insights)
+// ============================================================
+function InlineFormModal({
+  formId,
+  vehicleId,
+  onClose,
+  onSaved
+}: {
+  formId: FormId;
+  vehicleId: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Insurance form
+  const [insForm, setInsForm] = useState({
+    carrier_name: "",
+    premium_cents: "",
+    renewal_date: "",
+    coverage_type: ""
+  });
+
+  // Loan form
+  const [loanForm, setLoanForm] = useState({
+    lender_name: "",
+    balance_cents: "",
+    monthly_payment_cents: "",
+    apr_percent: "",
+    term_months: ""
+  });
+
+  // Fuel form
+  const [fuelForm, setFuelForm] = useState({
+    entry_date: new Date().toISOString().slice(0, 10),
+    total_cents: "",
+    gallons: ""
+  });
+
+  // Preferred shop form
+  const [shopForm, setShopForm] = useState({
+    name: "",
+    location: "",
+    phone: "",
+    email: ""
+  });
+
+  async function submit() {
+    setBusy(true);
+    setError(null);
+    try {
+      if (formId === "insurance") {
+        const body: Record<string, unknown> = {
+          carrier_name: insForm.carrier_name || null,
+          renewal_date: insForm.renewal_date || null,
+          coverage_type: insForm.coverage_type || null
+        };
+        if (insForm.premium_cents) body.premium_cents = Math.round(Number(insForm.premium_cents) * 100);
+        await api(`/api/insurance/${vehicleId}`, { method: "PUT", body: JSON.stringify(body) });
+      } else if (formId === "loan") {
+        const body: Record<string, unknown> = {
+          lender_name: loanForm.lender_name || null
+        };
+        if (loanForm.balance_cents) body.balance_cents = Math.round(Number(loanForm.balance_cents) * 100);
+        if (loanForm.monthly_payment_cents) body.monthly_payment_cents = Math.round(Number(loanForm.monthly_payment_cents) * 100);
+        if (loanForm.apr_percent) body.apr_bps = Math.round(Number(loanForm.apr_percent) * 100);
+        if (loanForm.term_months) body.term_months = Number(loanForm.term_months);
+        await api(`/api/loan-lease/${vehicleId}`, { method: "PUT", body: JSON.stringify(body) });
+      } else if (formId === "fuel") {
+        const body = {
+          entry_date: fuelForm.entry_date,
+          total_cents: Math.round(Number(fuelForm.total_cents || 0) * 100),
+          gallons: fuelForm.gallons ? Number(fuelForm.gallons) : null
+        };
+        await api(`/api/vehicles/${vehicleId}/fuel`, { method: "POST", body: JSON.stringify(body) });
+      } else if (formId === "preferred_shop") {
+        await api("/api/providers", {
+          method: "POST",
+          body: JSON.stringify({
+            name: shopForm.name,
+            location: shopForm.location || null,
+            phone: shopForm.phone || null,
+            email: shopForm.email || null,
+            provider_type: "service_shop",
+            is_preferred: true
+          })
+        });
+      }
+      onSaved();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Save failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const titles = {
+    insurance: "Add your insurance",
+    loan: "Add your loan",
+    fuel: "Log fuel cost",
+    preferred_shop: "Pick a preferred shop"
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <h2>{titles[formId]}</h2>
+          <button className="ghost icon-button" onClick={onClose}><X size={18} /></button>
+        </div>
+
+        {formId === "insurance" && (
+          <div className="form-grid">
+            <Field label="Carrier" value={insForm.carrier_name} onChange={(v) => setInsForm({ ...insForm, carrier_name: v })} />
+            <Field label="Monthly premium" value={insForm.premium_cents} onChange={(v) => setInsForm({ ...insForm, premium_cents: v })} money />
+            <Field label="Renewal date" value={insForm.renewal_date} onChange={(v) => setInsForm({ ...insForm, renewal_date: v })} type="date" />
+            <label>Coverage
+              <select value={insForm.coverage_type} onChange={(e) => setInsForm({ ...insForm, coverage_type: e.target.value })}>
+                <option value="">—</option>
+                <option value="liability">Liability only</option>
+                <option value="full">Full coverage</option>
+                <option value="comprehensive">Comprehensive</option>
+              </select>
+            </label>
+          </div>
+        )}
+
+        {formId === "loan" && (
+          <div className="form-grid">
+            <Field label="Lender" value={loanForm.lender_name} onChange={(v) => setLoanForm({ ...loanForm, lender_name: v })} />
+            <Field label="Current balance" value={loanForm.balance_cents} onChange={(v) => setLoanForm({ ...loanForm, balance_cents: v })} money />
+            <Field label="Monthly payment" value={loanForm.monthly_payment_cents} onChange={(v) => setLoanForm({ ...loanForm, monthly_payment_cents: v })} money />
+            <Field label="APR (%)" value={loanForm.apr_percent} onChange={(v) => setLoanForm({ ...loanForm, apr_percent: v })} decimal placeholder="e.g. 6.49" />
+            <Field label="Term (months)" value={loanForm.term_months} onChange={(v) => setLoanForm({ ...loanForm, term_months: v })} />
+          </div>
+        )}
+
+        {formId === "fuel" && (
+          <div className="form-grid">
+            <Field label="Date" value={fuelForm.entry_date} onChange={(v) => setFuelForm({ ...fuelForm, entry_date: v })} type="date" required />
+            <Field label="Total spent" value={fuelForm.total_cents} onChange={(v) => setFuelForm({ ...fuelForm, total_cents: v })} money required />
+            <Field label="Gallons" value={fuelForm.gallons} onChange={(v) => setFuelForm({ ...fuelForm, gallons: v })} decimal />
+          </div>
+        )}
+
+        {formId === "preferred_shop" && (
+          <div className="form-grid">
+            <Field label="Shop name" value={shopForm.name} onChange={(v) => setShopForm({ ...shopForm, name: v })} required />
+            <Field label="Location" value={shopForm.location} onChange={(v) => setShopForm({ ...shopForm, location: v })} />
+            <Field label="Phone" value={shopForm.phone} onChange={(v) => setShopForm({ ...shopForm, phone: v })} />
+            <Field label="Email" value={shopForm.email} onChange={(v) => setShopForm({ ...shopForm, email: v })} type="email" />
+          </div>
+        )}
+
+        {error && <div className="error">{error}</div>}
+        <div className="button-row">
+          <button className="primary" onClick={submit} disabled={busy}>
+            {busy ? "Saving…" : "Save"}
+          </button>
+          <button className="ghost" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// TASKS TAB
 // ============================================================
 function TaskCenter({
   dashboard,
   tasks,
   providers,
   autonomy,
+  highlightTaskId,
+  onActOnInsight,
+  actBusyKey,
   onRefresh
 }: {
   dashboard: Dashboard;
   tasks: Task[];
   providers: Provider[];
   autonomy: AutonomyStatus | null;
+  highlightTaskId: string | null;
+  onActOnInsight: (i: Insight) => void;
+  actBusyKey: string | null;
   onRefresh: () => void;
 }) {
   const groups = useMemo(
@@ -560,7 +987,7 @@ function TaskCenter({
 
   return (
     <section className="task-page">
-      {autonomy && <AutonomyBadge autonomy={autonomy} />}
+      {autonomy && <AutonomyStepper autonomy={autonomy} />}
 
       <div className="panel">
         <h2>What Automoteev recommends</h2>
@@ -569,7 +996,12 @@ function TaskCenter({
         ) : (
           <div className="recs-grid">
             {dashboard.insights.map((insight) => (
-              <RecommendationCard key={insight.key} insight={insight} />
+              <RecommendationCard
+                key={insight.key}
+                insight={insight}
+                onAct={() => onActOnInsight(insight)}
+                busy={actBusyKey === insight.key}
+              />
             ))}
           </div>
         )}
@@ -580,15 +1012,18 @@ function TaskCenter({
       <div className="panel">
         <h2>Active tasks</h2>
         {groups.active.length === 0 ? (
-          <p className="muted">No active tasks. Approve a recommendation above to get started.</p>
+          <p className="muted">No active tasks. Tap a recommendation above to get started.</p>
         ) : (
           groups.active.map((task) => (
-            <article className="task-card" key={task.id}>
+            <article
+              className={`task-card ${task.id === highlightTaskId ? "highlight" : ""}`}
+              key={task.id}
+            >
               <div className="task-title"><Wrench size={17} /> {task.title}</div>
               <div className={`status-chip status-${task.status}`}>{task.status.replaceAll("_", " ")}</div>
               {task.approval_summary && <p>{task.approval_summary}</p>}
               {task.shared_fields?.length ? (
-                <p className="muted">Shared after approval: {task.shared_fields.join(", ")}</p>
+                <p className="muted small">Shared after approval: {task.shared_fields.join(", ")}</p>
               ) : null}
               {task.status === "needs_user_approval" && (
                 <div className="button-row">
@@ -604,45 +1039,60 @@ function TaskCenter({
   );
 }
 
-function RecommendationCard({ insight }: { insight: Insight }) {
+function RecommendationCard({
+  insight,
+  onAct,
+  busy
+}: {
+  insight: Insight;
+  onAct: () => void;
+  busy: boolean;
+}) {
   const tone =
     insight.severity === "urgent" ? "rec-urgent" : insight.severity === "recommended" ? "rec-recommended" : "rec-info";
   return (
-    <div className={`rec-card ${tone}`}>
+    <button className={`rec-card ${tone}`} onClick={onAct} disabled={busy} type="button">
       <div className="rec-card-head">
-        {insight.severity === "urgent" ? <AlertTriangle size={18} /> : insight.category === "savings" ? <DollarSign size={18} /> : <Sparkles size={18} />}
+        {busy ? <Loader2 size={18} className="spinner" /> :
+          insight.severity === "urgent" ? <AlertTriangle size={18} /> :
+          insight.category === "insurance" || insight.category === "lending" ? <DollarSign size={18} /> :
+          <Sparkles size={18} />}
         <strong>{insight.title}</strong>
       </div>
       <p className="small">{insight.body}</p>
       {insight.estimated_savings_usd_per_year ? (
         <p className="small savings-hint">Estimated savings: ~${insight.estimated_savings_usd_per_year}/year</p>
       ) : null}
-      <div className="muted small">{insight.cta_label}</div>
-    </div>
+      <div className="rec-cta">{busy ? "Working…" : insight.cta_label} <ChevronRight size={14} /></div>
+    </button>
   );
 }
 
-function AutonomyBadge({ autonomy }: { autonomy: AutonomyStatus }) {
-  if (autonomy.autonomy_unlocked) {
-    return (
-      <div className="panel autonomy-badge unlocked">
-        <ShieldCheck size={18} />
-        <div>
-          <strong>Autonomy unlocked.</strong> Automoteev can now send outbound email on approved tasks
-          without per-email approval.
-        </div>
-      </div>
-    );
-  }
+function AutonomyStepper({ autonomy }: { autonomy: AutonomyStatus }) {
   const remaining = Math.max(0, autonomy.threshold - autonomy.approved_email_count);
   return (
-    <div className="panel autonomy-badge">
-      <Info size={18} />
-      <div>
-        <strong>{remaining} more approval{remaining === 1 ? "" : "s"} until autonomy unlocks.</strong>{" "}
-        Automoteev will ask before every outbound email for now. After {autonomy.threshold} approved sends,
-        it can act on your approved tasks automatically.
+    <div className="panel autonomy-stepper">
+      <div className="stepper-head">
+        <ShieldCheck size={18} />
+        <strong>Autonomy Level {autonomy.level}: {autonomy.level_label}</strong>
       </div>
+      <div className="stepper-progress">
+        {[1, 2, 3].map((step) => (
+          <div key={step} className={`step ${autonomy.level >= step ? "active" : ""} ${autonomy.level === step ? "current" : ""}`}>
+            <div className="step-dot">{step}</div>
+            <div className="step-label">
+              {step === 1 ? "Assisted" : step === 2 ? "Trusted" : "Autonomous"}
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="small muted">
+        {autonomy.level === 3
+          ? "Automoteev acts on approved categories without asking each time."
+          : autonomy.level === 2
+          ? "Repeats allowed for tasks you've already approved."
+          : `Asks before every outbound action. ${remaining} more approval${remaining === 1 ? "" : "s"} until Trusted, ${autonomy.threshold - autonomy.approved_email_count} until Autonomous.`}
+      </p>
     </div>
   );
 }
@@ -691,51 +1141,56 @@ function ProviderOutreach({
     }
   }
 
+  if (approvedTasks.length === 0 && providers.length === 0) {
+    // Hide outreach panel until there's a reason to show it
+    return null;
+  }
+
   return (
     <div className="panel outreach-panel">
-      <div>
-        <h2>Provider outreach</h2>
+      <details>
+        <summary><h2 style={{ display: "inline" }}>Provider outreach</h2></summary>
         <p className="muted small">Add a provider manually, or let Automoteev find one. Email outreach requires Pro and an approved task.</p>
-      </div>
-      <form className="provider-form" onSubmit={saveProvider}>
-        <Field label="Provider name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} required />
-        <Field label="Email" value={form.email} onChange={(v) => setForm({ ...form, email: v })} type="email" />
-        <Field label="Phone" value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} />
-        <label>Type
-          <select value={form.provider_type} onChange={(e) => setForm({ ...form, provider_type: e.target.value })}>
-            <option value="service_shop">Service shop</option>
-            <option value="dealership_service">Dealership service</option>
-            <option value="oil_change">Oil change</option>
-            <option value="tire_shop">Tire shop</option>
-            <option value="body_shop">Body shop</option>
-            <option value="insurance_agent">Insurance agent</option>
-            <option value="buying_center">Buying center</option>
-          </select>
-        </label>
-        <Field label="Location" value={form.location} onChange={(v) => setForm({ ...form, location: v })} />
-        <button className="secondary" type="submit">Add provider</button>
-      </form>
-      <div className="provider-form">
-        <label>Approved task
-          <select value={selectedTask} onChange={(e) => setSelectedTask(e.target.value)}>
-            <option value="">Select task</option>
-            {approvedTasks.map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}
-          </select>
-        </label>
-        <label>Provider
-          <select value={selectedProvider} onChange={(e) => setSelectedProvider(e.target.value)}>
-            <option value="">Select provider</option>
-            {providers.filter((p) => p.email).map((p) => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
-        </label>
-        <label>Notes<textarea value={notes} onChange={(e) => setNotes(e.target.value)} /></label>
-        <button className="primary" disabled={!selectedTask || !selectedProvider} onClick={sendEmail} type="button">
-          <Mail size={18} /> {autonomy?.requires_approval_for_next_send ? "Approve & send" : "Send email"}
-        </button>
-      </div>
-      {message && <div className="notice">{message}</div>}
+        <form className="provider-form" onSubmit={saveProvider}>
+          <Field label="Provider name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} required />
+          <Field label="Email" value={form.email} onChange={(v) => setForm({ ...form, email: v })} type="email" />
+          <Field label="Phone" value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} />
+          <label>Type
+            <select value={form.provider_type} onChange={(e) => setForm({ ...form, provider_type: e.target.value })}>
+              <option value="service_shop">Service shop</option>
+              <option value="dealership_service">Dealership service</option>
+              <option value="oil_change">Oil change</option>
+              <option value="tire_shop">Tire shop</option>
+              <option value="body_shop">Body shop</option>
+              <option value="insurance_agent">Insurance agent</option>
+              <option value="buying_center">Buying center</option>
+            </select>
+          </label>
+          <Field label="Location" value={form.location} onChange={(v) => setForm({ ...form, location: v })} />
+          <button className="secondary" type="submit">Add provider</button>
+        </form>
+        <div className="provider-form">
+          <label>Approved task
+            <select value={selectedTask} onChange={(e) => setSelectedTask(e.target.value)}>
+              <option value="">Select task</option>
+              {approvedTasks.map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}
+            </select>
+          </label>
+          <label>Provider
+            <select value={selectedProvider} onChange={(e) => setSelectedProvider(e.target.value)}>
+              <option value="">Select provider</option>
+              {providers.filter((p) => p.email).map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          </label>
+          <label>Notes<textarea value={notes} onChange={(e) => setNotes(e.target.value)} /></label>
+          <button className="primary" disabled={!selectedTask || !selectedProvider} onClick={sendEmail} type="button">
+            <Mail size={18} /> {autonomy?.requires_approval_for_next_send ? "Approve & send" : "Send email"}
+          </button>
+        </div>
+        {message && <div className="notice">{message}</div>}
+      </details>
     </div>
   );
 }
@@ -758,7 +1213,7 @@ function Command({ vehicleId, onCreated }: { vehicleId: string; onCreated: () =>
         body: JSON.stringify({ vehicle_id: vehicleId, command })
       });
       setConfirmation(
-        `Got it. Automoteev is on it — "${command}". You'll get an approval request before any provider is contacted, and live updates as work happens.`
+        `Got it. Automoteev is on it — "${command}". You'll get an approval request before any provider is contacted.`
       );
       setCommand("");
       onCreated();
@@ -798,7 +1253,7 @@ function Command({ vehicleId, onCreated }: { vehicleId: string; onCreated: () =>
 }
 
 // ============================================================
-// HISTORY TAB — completed + cancelled + failed live here, quietly
+// HISTORY TAB
 // ============================================================
 function History({ tasks }: { tasks: Task[] }) {
   const closed = tasks.filter((t) => ["completed", "failed", "cancelled"].includes(t.status));
@@ -882,11 +1337,11 @@ function Settings({ autonomy }: { autonomy: AutonomyStatus | null }) {
           </>
         ) : (
           <>
-            <p><strong>Free:</strong> dashboard, recall checks, savings recommendations, basic alerts.</p>
-            <p><strong>Pro $4.99/month or $49/year:</strong> autonomous agent outreach, multi-vehicle, advanced alerts, OBD dongle.</p>
+            <p><strong>Free:</strong> dashboard, recall checks, savings recommendations, valuation, fuel log.</p>
+            <p><strong>Pro $9.99/mo or $99/yr:</strong> autonomous agent outreach, multi-vehicle, document upload + AI auto-fill, OBD dongle, SMS channel (coming soon).</p>
             <div className="button-row">
-              <button className="primary" onClick={() => checkout("monthly")}>Upgrade — $4.99/mo</button>
-              <button className="secondary" onClick={() => checkout("annual")}>Upgrade — $49/yr (save ~18%)</button>
+              <button className="primary" onClick={() => checkout("monthly")}>Upgrade — $9.99/mo</button>
+              <button className="secondary" onClick={() => checkout("annual")}>Upgrade — $99/yr (save ~17%)</button>
             </div>
           </>
         )}
@@ -906,15 +1361,11 @@ function Settings({ autonomy }: { autonomy: AutonomyStatus | null }) {
           <p className="muted">Alias will be assigned after your first vehicle is created.</p>
         )}
 
-        <h2 style={{ marginTop: 20 }}>Autonomy</h2>
-        {autonomy ? (
-          autonomy.autonomy_unlocked ? (
-            <p>Unlocked. Automoteev can send email on approved tasks without per-email approval.</p>
-          ) : (
-            <p>{Math.max(0, autonomy.threshold - autonomy.approved_email_count)} more approvals until autonomy unlocks.</p>
-          )
-        ) : (
-          <p className="muted">Loading…</p>
+        {autonomy && (
+          <>
+            <h2 style={{ marginTop: 20 }}>Autonomy</h2>
+            <AutonomyStepper autonomy={autonomy} />
+          </>
         )}
 
         <h2 style={{ marginTop: 20 }}>Privacy</h2>

@@ -105,7 +105,49 @@ const MODEL_BASELINE_USD: Record<string, number> = {
   "gmc:yukon": 60_000,
   "volkswagen:jetta": 22_000,
   "volkswagen:tiguan": 28_000,
-  "volkswagen:atlas": 38_000
+  "volkswagen:atlas": 38_000,
+  // Land Rover / Range Rover
+  "land rover:range rover": 92_000,
+  "land rover:range rover sport": 75_000,
+  "land rover:range rover velar": 60_000,
+  "land rover:range rover evoque": 45_000,
+  "land rover:discovery": 55_000,
+  "land rover:discovery sport": 42_000,
+  "land rover:defender": 55_000,
+  // Porsche
+  "porsche:cayenne": 75_000,
+  "porsche:macan": 60_000,
+  "porsche:911": 110_000,
+  "porsche:panamera": 95_000,
+  "porsche:taycan": 95_000,
+  // Genesis
+  "genesis:g70": 38_000,
+  "genesis:g80": 48_000,
+  "genesis:g90": 73_000,
+  "genesis:gv70": 43_000,
+  "genesis:gv80": 56_000,
+  // Volvo
+  "volvo:xc60": 45_000,
+  "volvo:xc90": 56_000,
+  "volvo:xc40": 36_000,
+  "volvo:s60": 41_000,
+  // Cadillac
+  "cadillac:escalade": 80_000,
+  "cadillac:xt5": 45_000,
+  "cadillac:xt6": 50_000,
+  "cadillac:ct5": 40_000,
+  // Lincoln
+  "lincoln:navigator": 78_000,
+  "lincoln:aviator": 55_000,
+  "lincoln:nautilus": 45_000,
+  // Acura
+  "acura:mdx": 50_000,
+  "acura:rdx": 42_000,
+  "acura:tlx": 39_000,
+  // Infiniti
+  "infiniti:qx60": 49_000,
+  "infiniti:qx80": 70_000,
+  "infiniti:q50": 42_000
 };
 
 export function estimateVehicleValue(input: ValuationInput): ValuationResult | null {
@@ -162,17 +204,21 @@ export function estimateVehicleValue(input: ValuationInput): ValuationResult | n
 }
 
 function baselineForVehicle(make: string, model: string): number {
-  const key = `${make.toLowerCase()}:${model.toLowerCase()}`;
+  // Normalize: lowercase + collapse multi-space.
+  const key = `${make.toLowerCase()}:${model.toLowerCase().replace(/\s+/g, " ").trim()}`;
   if (MODEL_BASELINE_USD[key]) return MODEL_BASELINE_USD[key]!;
 
   // Fallback: classify by make-only segment.
   const m = make.toLowerCase();
-  if (["bmw", "mercedes-benz", "audi", "lexus", "porsche", "infiniti", "acura", "cadillac", "lincoln", "genesis", "land rover", "volvo"].includes(m)) {
+  // Ultra-luxury: Range Rover-tier brands fall back to luxury_suv even if model is unknown.
+  if (["land rover", "porsche", "maserati", "bentley", "rolls-royce", "aston martin", "ferrari", "lamborghini"].includes(m)) {
+    return SEGMENT_DEFAULTS.luxury_suv!;
+  }
+  if (["bmw", "mercedes-benz", "audi", "lexus", "infiniti", "acura", "cadillac", "lincoln", "genesis", "volvo"].includes(m)) {
     return SEGMENT_DEFAULTS.luxury_car!;
   }
   if (m === "tesla") return SEGMENT_DEFAULTS.ev!;
   if (["ram", "ford", "chevrolet", "gmc", "toyota", "nissan"].includes(m)) {
-    // Default to midsize; pickups / large SUVs are more common queries here.
     return SEGMENT_DEFAULTS.midsize_suv!;
   }
   return SEGMENT_DEFAULTS.unknown!;

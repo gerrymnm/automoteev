@@ -25,14 +25,36 @@ export type InsightCategory =
   | "action_ready"
   | "info";
 
+export type AutonomyCategoryName =
+  | "service"
+  | "insurance"
+  | "lending"
+  | "sale"
+  | "fuel"
+  | "general";
+
+export type AutonomyLevel = 1 | 2 | 3;
+export type AutonomyLevelLabel = "Assisted" | "Trusted" | "Autonomous";
+
+export interface InsightAction {
+  type: "create_task" | "open_form" | "run_recall_check";
+  task_type?: string;
+  category?: AutonomyCategoryName;
+  task_title?: string;
+  approval_summary?: string;
+  shared_fields?: string[];
+  prefill?: Record<string, unknown>;
+  form_id?: "insurance" | "loan" | "fuel" | "preferred_shop";
+}
+
 export interface Insight {
   key: string;
-  category: InsightCategory;
+  category: AutonomyCategoryName;
   severity: InsightSeverity;
   title: string;
   body: string;
   cta_label: string;
-  cta_route: string;
+  action: InsightAction;
   estimated_savings_usd_per_year?: number;
 }
 
@@ -144,12 +166,27 @@ export interface Dashboard {
   total_estimated_annual_savings_usd: number;
 }
 
+export interface CategoryAutonomy {
+  category: AutonomyCategoryName;
+  level: AutonomyLevel;
+  level_label: AutonomyLevelLabel;
+  level_description: string;
+  approved_count: number;
+  threshold: number;
+  unlocked_at: string | null;
+  requires_approval_for_next_send: boolean;
+}
+
 export interface AutonomyStatus {
+  level: AutonomyLevel;
+  level_label: AutonomyLevelLabel;
+  level_description: string;
   approved_email_count: number;
   threshold: number;
   autonomy_unlocked: boolean;
   autonomy_unlocked_at: string | null;
   requires_approval_for_next_send: boolean;
+  categories: CategoryAutonomy[];
   agent_email: string | null;
 }
 
@@ -162,6 +199,39 @@ export interface SubscriptionStatus {
     plan: "pro_monthly" | "pro_annual";
     current_period_end: string | null;
   } | null;
+}
+
+export interface UploadedDocument {
+  id: string;
+  user_id: string;
+  vehicle_id: string | null;
+  document_kind:
+    | "insurance_dec_page"
+    | "loan_statement"
+    | "lease_agreement"
+    | "registration"
+    | "recall_notice"
+    | "service_record"
+    | "sale_paperwork"
+    | "other";
+  file_name: string;
+  mime_type: string;
+  byte_size: number;
+  extraction_status: "pending" | "processing" | "completed" | "failed";
+  extracted_data: Record<string, unknown> | null;
+  extraction_error: string | null;
+  uploaded_at: string;
+  extracted_at: string | null;
+}
+
+export interface MCPConnection {
+  id: string;
+  client_name: string;
+  scopes: string[];
+  expires_at: string | null;
+  last_used_at: string | null;
+  created_at: string;
+  revoked_at: string | null;
 }
 
 export interface OnboardingPrompt {

@@ -4,6 +4,7 @@ import helmet from "helmet";
 import { env } from "./config.js";
 import { router } from "./routes.js";
 import { webhooks } from "./webhooks.js";
+import { mcpRouter } from "./mcp/server.js";
 
 const app = express();
 
@@ -41,6 +42,11 @@ app.use(webhooks);
 
 // JSON for everything else.
 app.use(express.json({ limit: "1mb" }));
+
+// MCP routes (well-known is public; /mcp endpoint authenticates via bearer token internally;
+// /mcp/auth/token is mounted inside the regular auth gate via routes.ts).
+app.use(mcpRouter);
+
 app.use(router);
 
 app.listen(env.PORT, () => {

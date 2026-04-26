@@ -96,7 +96,8 @@ export const providerSchema = z.object({
   email: z.string().email().optional().nullable(),
   phone: z.string().optional().nullable(),
   provider_type: z.string().min(1),
-  location: z.string().optional().nullable()
+  location: z.string().optional().nullable(),
+  is_preferred: z.boolean().optional().default(false)
 });
 
 export const approvalSchema = z.object({

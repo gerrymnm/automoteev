@@ -1,28 +1,40 @@
 // Insight engine: always returns a prioritized list of things Automoteev can do
-// for the user — gaps to close, savings to capture, action to take. The dashboard
-// uses the top item as the hero "Recommended action" and the rest as the
-// "Things to improve" panel. This is what makes Automoteev feel alive.
+// for the user. Each insight declares an executable action, so tapping a
+// recommendation creates a pre-populated task in needs_user_approval state
+// (Option A: two-tap flow — create then approve).
 
 import type { OverallStatus } from "../types.js";
+import type { AutonomyCategory } from "../services/agent.js";
 import { maintenanceDue } from "./maintenance.js";
 
 export type InsightSeverity = "info" | "recommended" | "urgent";
-export type InsightCategory =
-  | "savings"
-  | "safety"
-  | "completeness"
-  | "maintenance"
-  | "action_ready"
-  | "info";
+
+export type InsightActionType =
+  | "create_task" // Creates a vehicle_task in needs_user_approval state
+  | "open_form" // Opens an inline form (e.g. add insurance)
+  | "run_recall_check"; // Manual fallback for recall lookup
+
+export interface InsightAction {
+  type: InsightActionType;
+  // For create_task:
+  task_type?: string;
+  category?: AutonomyCategory;
+  task_title?: string;
+  approval_summary?: string;
+  shared_fields?: string[];
+  prefill?: Record<string, unknown>;
+  // For open_form:
+  form_id?: "insurance" | "loan" | "fuel" | "preferred_shop";
+}
 
 export interface Insight {
   key: string;
-  category: InsightCategory;
+  category: AutonomyCategory;
   severity: InsightSeverity;
   title: string;
   body: string;
   cta_label: string;
-  cta_route: string;
+  action: InsightAction;
   estimated_savings_usd_per_year?: number;
 }
 
@@ -73,7 +85,7 @@ export function generateInsights(input: InsightInput): Insight[] {
   if (input.openRecallCount > 0) {
     list.push({
       key: "open_recall",
-      category: "safety",
+      category: "service",
       severity: "urgent",
       title:
         input.openRecallCount === 1
@@ -81,19 +93,27 @@ export function generateInsights(input: InsightInput): Insight[] {
           : `${input.openRecallCount} open recalls on your vehicle`,
       body: "Recall repairs are free at any authorized dealer. Automoteev can request appointment availability for you.",
       cta_label: "Have Automoteev schedule it",
-      cta_route: "/tasks/new?type=recall_repair"
+      action: {
+        type: "create_task",
+        task_type: "recall_repair",
+        category: "service",
+        task_title: "Schedule recall repair",
+        approval_summary:
+          "Automoteev will contact 2-3 authorized dealers to request the soonest recall appointment.",
+        shared_fields: ["name", "vehicle", "VIN", "mileage", "recall campaigns"]
+      }
     });
   }
 
   if (input.vehicle.recall_status === "unknown" || input.vehicle.recall_status === null) {
     list.push({
       key: "recall_check_missing",
-      category: "safety",
+      category: "service",
       severity: "recommended",
       title: "Run a recall check",
       body: "Automoteev hasn't yet looked up open recalls for this VIN. Takes a few seconds.",
       cta_label: "Run recall check now",
-      cta_route: "/recalls/check"
+      action: { type: "run_recall_check" }
     });
   }
 
@@ -102,39 +122,38 @@ export function generateInsights(input: InsightInput): Insight[] {
   if (maint.service_overdue) {
     list.push({
       key: "service_overdue",
-      category: "maintenance",
+      category: "service",
       severity: "urgent",
       title: "Service is overdue",
-      body: `Your vehicle is past its next service interval at ${maint.next_service_due_miles.toLocaleString()} miles. Skipping maintenance reduces resale value and risks engine wear.`,
-      cta_label: "Find a shop",
-      cta_route: "/tasks/new?type=service"
+      body: `Your vehicle is past its next service interval at ${maint.next_service_due_miles.toLocaleString()} miles.`,
+      cta_label: "Get service quotes",
+      action: {
+        type: "create_task",
+        task_type: "service_quote",
+        category: "service",
+        task_title: "Get service quotes",
+        approval_summary:
+          "Automoteev will request quotes from 3 nearby shops for your overdue service items.",
+        shared_fields: ["name", "vehicle", "mileage", "service items"]
+      }
     });
   } else if (maint.service_due_soon) {
     list.push({
       key: "service_due_soon",
-      category: "maintenance",
+      category: "service",
       severity: "recommended",
       title: "Service due soon",
       body: `Next service is around ${maint.next_service_due_miles.toLocaleString()} miles. Automoteev can request quotes from nearby shops.`,
       cta_label: "Get service quotes",
-      cta_route: "/tasks/new?type=service"
-    });
-  }
-
-  if (input.maintenanceItems) {
-    for (const item of input.maintenanceItems) {
-      if (item.status === "overdue" && item.item_type !== "oil_change") {
-        list.push({
-          key: `maint_overdue_${item.item_type}`,
-          category: "maintenance",
-          severity: "urgent",
-          title: `${humanize(item.item_type)} overdue`,
-          body: "Automoteev can request quotes from nearby shops for this service.",
-          cta_label: "Get quotes",
-          cta_route: "/tasks/new?type=service"
-        });
+      action: {
+        type: "create_task",
+        task_type: "service_quote",
+        category: "service",
+        task_title: "Get service quotes",
+        approval_summary: "Automoteev will request quotes from 3 nearby shops.",
+        shared_fields: ["name", "vehicle", "mileage", "service items"]
       }
-    }
+    });
   }
 
   // ---- SAVINGS — INSURANCE ----
@@ -148,12 +167,20 @@ export function generateInsights(input: InsightInput): Insight[] {
       const annualSavings = Math.round(monthlyDollars * 12 * 0.1);
       list.push({
         key: "shop_insurance",
-        category: "savings",
+        category: "insurance",
         severity: "recommended",
         title: `Could save ~$${annualSavings}/yr on insurance`,
         body: `You're paying $${monthlyDollars.toFixed(0)}/mo. Drivers who rate-shop every 6 months save ~10% on average. Automoteev can request quotes from 3-5 carriers.`,
         cta_label: "Get insurance quotes",
-        cta_route: "/tasks/new?type=insurance_quote",
+        action: {
+          type: "create_task",
+          task_type: "insurance_quote",
+          category: "insurance",
+          task_title: "Shop competing insurance quotes",
+          approval_summary:
+            "Automoteev will request quotes from 3-5 carriers matching your current coverage.",
+          shared_fields: ["name", "vehicle", "VIN", "ZIP", "current coverage"]
+        },
         estimated_savings_usd_per_year: annualSavings
       });
     }
@@ -164,12 +191,20 @@ export function generateInsights(input: InsightInput): Insight[] {
     if (days >= 0 && days <= 30) {
       list.push({
         key: "insurance_renewal_window",
-        category: "savings",
+        category: "insurance",
         severity: "urgent",
         title: `Insurance renews in ${days} day${days === 1 ? "" : "s"}`,
         body: "This is the cheapest time to switch carriers. Automoteev can pull competing quotes today.",
         cta_label: "Shop competing quotes",
-        cta_route: "/tasks/new?type=insurance_quote",
+        action: {
+          type: "create_task",
+          task_type: "insurance_quote",
+          category: "insurance",
+          task_title: "Shop competing insurance quotes",
+          approval_summary:
+            "Automoteev will request quotes from 3-5 carriers matching your current coverage.",
+          shared_fields: ["name", "vehicle", "VIN", "ZIP", "current coverage"]
+        },
         estimated_savings_usd_per_year:
           premiumCents > 0 ? Math.round((premiumCents / 100) * 12 * 0.1) : undefined
       });
@@ -185,12 +220,20 @@ export function generateInsights(input: InsightInput): Insight[] {
       const savedInterest = Math.round((balance * 0.02 * remainingMonths) / 12);
       list.push({
         key: "refinance_loan",
-        category: "savings",
+        category: "lending",
         severity: "recommended",
         title: `Refinancing could save ~$${savedInterest}/yr`,
         body: `Your APR is ${apr.toFixed(2)}%. Credit unions and online lenders are routinely 2+ points lower. Automoteev can request soft-pull quotes.`,
         cta_label: "Get refinance quotes",
-        cta_route: "/tasks/new?type=refinance",
+        action: {
+          type: "create_task",
+          task_type: "refinance",
+          category: "lending",
+          task_title: "Get refinance quotes",
+          approval_summary:
+            "Automoteev will request soft-pull quotes from 3 lenders. No hard credit pulls.",
+          shared_fields: ["name", "vehicle", "VIN", "current APR", "current balance"]
+        },
         estimated_savings_usd_per_year: savedInterest
       });
     }
@@ -201,12 +244,20 @@ export function generateInsights(input: InsightInput): Insight[] {
     if (days >= 0 && days <= 90) {
       list.push({
         key: "lease_end_window",
-        category: "action_ready",
+        category: "lending",
         severity: "urgent",
         title: `Lease ends in ${days} day${days === 1 ? "" : "s"}`,
         body: "Now's the time to decide: buyout, return, or trade. Automoteev can prepare each option side-by-side.",
         cta_label: "Plan lease end",
-        cta_route: "/tasks/new?type=lease_end"
+        action: {
+          type: "create_task",
+          task_type: "lease_end",
+          category: "lending",
+          task_title: "Lease-end planning",
+          approval_summary:
+            "Automoteev will prepare buyout, return, and trade-in options side-by-side.",
+          shared_fields: ["vehicle", "lease balance", "maturity date"]
+        }
       });
     }
   }
@@ -218,44 +269,44 @@ export function generateInsights(input: InsightInput): Insight[] {
   ) {
     list.push({
       key: "missing_loan_info",
-      category: "completeness",
+      category: "lending",
       severity: "recommended",
       title: "Add your loan details",
-      body: "Without your APR and balance, Automoteev can't tell you whether refinancing would save money. Takes 60 seconds.",
-      cta_label: "Add loan details",
-      cta_route: "/loan"
+      body: "Without your APR and balance, Automoteev can't tell you whether refinancing would save money. Snap a photo of your loan statement and we'll fill it in.",
+      cta_label: "Upload loan statement",
+      action: { type: "open_form", form_id: "loan" }
     });
   }
   if (!input.insurance?.carrier_name) {
     list.push({
       key: "missing_insurance",
-      category: "completeness",
+      category: "insurance",
       severity: "recommended",
       title: "Add your insurance",
-      body: "With your premium and renewal date, Automoteev can rate-shop on your behalf and only alert you to real savings.",
-      cta_label: "Add insurance",
-      cta_route: "/insurance"
+      body: "Snap a photo of your insurance dec page and Automoteev will fill in carrier, premium, coverage, and renewal date automatically.",
+      cta_label: "Upload dec page",
+      action: { type: "open_form", form_id: "insurance" }
     });
   } else if (!input.insurance.premium_cents || !input.insurance.renewal_date) {
     list.push({
       key: "incomplete_insurance",
-      category: "completeness",
+      category: "insurance",
       severity: "info",
       title: "Complete your insurance details",
       body: "Add your premium and renewal date so Automoteev can time quote requests for the cheapest switch window.",
       cta_label: "Complete insurance",
-      cta_route: "/insurance"
+      action: { type: "open_form", form_id: "insurance" }
     });
   }
   if (!input.preferredServiceShopExists) {
     list.push({
       key: "no_preferred_shop",
-      category: "completeness",
+      category: "service",
       severity: "info",
       title: "Pick a preferred service shop",
       body: "Automoteev will request quotes from a few options near you and remember the one you pick.",
       cta_label: "Find shops near me",
-      cta_route: "/tasks/new?type=service"
+      action: { type: "open_form", form_id: "preferred_shop" }
     });
   }
 
@@ -263,12 +314,12 @@ export function generateInsights(input: InsightInput): Insight[] {
   if (input.monthsSinceLastFuelEntry === null || input.monthsSinceLastFuelEntry > 1) {
     list.push({
       key: "log_fuel",
-      category: "info",
+      category: "fuel",
       severity: "info",
       title: "Log this month's fuel spend",
       body: "Tracking fuel cost makes Automoteev's monthly cost number accurate and unlocks fuel-economy alerts.",
       cta_label: "Log fuel cost",
-      cta_route: "/fuel"
+      action: { type: "open_form", form_id: "fuel" }
     });
   }
 
@@ -276,12 +327,12 @@ export function generateInsights(input: InsightInput): Insight[] {
   if (list.length === 0) {
     list.push({
       key: "all_good_value_check",
-      category: "info",
+      category: "general",
       severity: "info",
       title: "Refresh your vehicle's market value",
-      body: "Automoteev can pull the current estimated market and dealer values for your vehicle — useful before insurance renewal, refinancing, or selling.",
+      body: "Automoteev can re-estimate market and dealer values for your vehicle.",
       cta_label: "Refresh value estimate",
-      cta_route: "/value"
+      action: { type: "create_task", task_type: "value_refresh", category: "general", task_title: "Refresh value estimate" }
     });
   }
 
@@ -303,11 +354,4 @@ function severityRank(s: InsightSeverity): number {
 function daysUntil(date: string): number {
   const target = new Date(`${date}T00:00:00.000Z`).getTime();
   return Math.ceil((target - Date.now()) / 86_400_000);
-}
-
-function humanize(slug: string): string {
-  return slug
-    .split("_")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
 }

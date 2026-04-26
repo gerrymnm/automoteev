@@ -1,13 +1,22 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
 import "express-async-errors";
+import multer from "multer";
+import { createHash, randomBytes } from "crypto";
 import { z } from "zod";
 import { requireAuth } from "./auth.js";
 import { audit } from "./audit.js";
 import { env } from "./config.js";
+import { supabaseAdmin } from "./supabase.js";
 import { calculateCosts } from "./engines/cost.js";
 import { generateAlerts, statusFromAlerts } from "./engines/alerts.js";
 import { generateInsights, statusFromInsights } from "./engines/insights.js";
 import { estimateVehicleValue } from "./services/valuation.js";
+import {
+  uploadDocument,
+  extractDocument,
+  applyExtractedDocument,
+  type DocumentKind
+} from "./services/documents.js";
 import {
   maintenanceDue,
   seedMaintenanceItems
@@ -197,18 +206,46 @@ router.post("/api/onboarding", async (req, res) => {
   if (vehicleError) return res.status(400).json({ error: vehicleError.message });
 
   // 5b. Run recall lookup in the background — don't block onboarding if NHTSA is slow.
+  // IMPORTANT: use supabaseAdmin here, not req.db. The request context (and its
+  // user-scoped client) is gone by the time this background promise runs.
+  // Capture stable values now since req may be GC'd.
+  const userId = req.user!.id;
+  const vehicleIdForRecall = vehicle.id;
+  const recallMake = decoded.make;
+  const recallModel = decoded.model;
+  const recallYear = decoded.year;
   void (async () => {
     try {
-      const recall = await lookupRecallsByVehicle({
-        make: decoded.make,
-        model: decoded.model,
-        modelYear: decoded.year
-      });
+      // NHTSA recall API is sometimes case-sensitive on model. Normalize aggressively.
+      const normalizedMake = recallMake?.trim().toUpperCase() ?? null;
+      // Try the model as-is first, then uppercase, then strip extra whitespace.
+      const modelCandidates = [
+        recallModel?.trim() ?? null,
+        recallModel?.trim().toUpperCase() ?? null,
+        recallModel?.replace(/\s+/g, " ").trim() ?? null
+      ].filter((m): m is string => Boolean(m));
+      const uniqueModels = Array.from(new Set(modelCandidates));
+
+      let recall;
+      for (const candidate of uniqueModels) {
+        recall = await lookupRecallsByVehicle({
+          make: normalizedMake,
+          model: candidate,
+          modelYear: recallYear
+        });
+        if (recall.source === "nhtsa") break; // Got a real response, even if 0 campaigns.
+      }
+      if (!recall) return;
+
+      console.log(
+        `[onboarding] recall lookup for ${normalizedMake} ${recallModel} ${recallYear}: ${recall.campaigns.length} campaign(s), source=${recall.source}`
+      );
+
       if (recall.campaigns.length) {
-        await req.db!.from("recalls").upsert(
+        await supabaseAdmin.from("recalls").upsert(
           recall.campaigns.map((c) => ({
-            user_id: req.user!.id,
-            vehicle_id: vehicle.id,
+            user_id: userId,
+            vehicle_id: vehicleIdForRecall,
             nhtsa_campaign_id: c.nhtsa_campaign_id,
             summary: c.summary,
             component: c.component,
@@ -219,10 +256,10 @@ router.post("/api/onboarding", async (req, res) => {
           { onConflict: "vehicle_id,nhtsa_campaign_id", ignoreDuplicates: true }
         );
       }
-      await req
-        .db!.from("vehicles")
+      await supabaseAdmin
+        .from("vehicles")
         .update({ recall_status: recall.hasOpenRecall ? "open" : "clear" })
-        .eq("id", vehicle.id);
+        .eq("id", vehicleIdForRecall);
     } catch (err) {
       console.error("[onboarding] recall lookup failed (non-fatal)", err);
     }
@@ -676,8 +713,10 @@ router.post("/api/tasks/:id/emails", async (req, res) => {
 
   await req.db!.from("vehicle_tasks").update({ status: "waiting_on_provider" }).eq("id", taskId);
 
-  // Count this as an approved send (will auto-unlock autonomy at threshold)
-  const newAutonomy = await recordApprovedSend(req.user!.id);
+  // Count this as an approved send (will auto-unlock autonomy at threshold).
+  // Use the task's category so per-category autonomy progresses correctly.
+  const taskCategory = (task.category as any) ?? "general";
+  const newAutonomy = await recordApprovedSend(req.user!.id, taskCategory);
 
   await audit({
     userId: req.user!.id,
@@ -1246,6 +1285,275 @@ router.post("/api/vehicles/:id/fuel", async (req, res) => {
     .single();
   if (error) return res.status(400).json({ error: error.message });
   return res.status(201).json({ entry: data });
+});
+
+// ---------- Insights: act on a recommendation (one-tap to create task) ----------
+
+router.post("/api/insights/act", async (req, res) => {
+  const schema = z.object({
+    insight_key: z.string().min(1),
+    vehicle_id: z.string().uuid()
+  });
+  const { insight_key, vehicle_id } = schema.parse(req.body);
+
+  // Re-generate insights live so we operate on the freshest set
+  const vehicle = await one(
+    req.db!.from("vehicles").select("*").eq("id", vehicle_id)
+  );
+  if (!vehicle) return res.status(404).json({ error: "Vehicle not found" });
+
+  const [costProfile, loanLease, insurance, maintRes, recallsRes, providersRes, fuelRes] =
+    await Promise.all([
+      one(req.db!.from("vehicle_cost_profiles").select("*").eq("vehicle_id", vehicle_id)),
+      one(req.db!.from("loan_lease_accounts").select("*").eq("vehicle_id", vehicle_id)),
+      one(req.db!.from("insurance_accounts").select("*").eq("vehicle_id", vehicle_id)),
+      req.db!.from("maintenance_items").select("*").eq("vehicle_id", vehicle_id),
+      req.db!.from("recalls").select("*").eq("vehicle_id", vehicle_id).is("resolved_at", null),
+      req.db!.from("providers").select("id").eq("is_preferred", true).limit(1),
+      req
+        .db!.from("fuel_entries")
+        .select("entry_date")
+        .eq("vehicle_id", vehicle_id)
+        .order("entry_date", { ascending: false })
+        .limit(1)
+    ]);
+
+  const lastShoppedAt = (insurance as any)?.last_shopped_at;
+  const lastFuelEntry = fuelRes.data?.[0]?.entry_date;
+
+  const insights = generateInsights({
+    vehicle,
+    costProfile,
+    loanLease,
+    insurance,
+    maintenanceItems: (maintRes.data ?? []) as any,
+    openRecallCount: (recallsRes.data ?? []).length,
+    preferredServiceShopExists: (providersRes.data ?? []).length > 0,
+    monthsSinceLastFuelEntry: lastFuelEntry
+      ? Math.floor((Date.now() - new Date(lastFuelEntry).getTime()) / (30 * 86_400_000))
+      : null,
+    daysSinceLastInsuranceShop: lastShoppedAt
+      ? Math.floor((Date.now() - new Date(lastShoppedAt).getTime()) / 86_400_000)
+      : null
+  });
+
+  const insight = insights.find((i) => i.key === insight_key);
+  if (!insight) {
+    return res.status(404).json({ error: "Insight no longer applies" });
+  }
+
+  // Branch by action type
+  if (insight.action.type === "create_task") {
+    const { data: task, error } = await req
+      .db!.from("vehicle_tasks")
+      .insert({
+        user_id: req.user!.id,
+        vehicle_id,
+        task_type: insight.action.task_type ?? "general",
+        category: insight.category,
+        title: insight.action.task_title ?? insight.title,
+        description: insight.body,
+        status: "needs_user_approval",
+        approval_summary: insight.action.approval_summary ?? null,
+        shared_fields: insight.action.shared_fields ?? null
+      })
+      .select()
+      .single();
+    if (error) return res.status(400).json({ error: error.message });
+
+    await audit({
+      userId: req.user!.id,
+      taskId: task.id,
+      vehicleId: vehicle_id,
+      eventType: "insight_acted",
+      summary: `Insight "${insight.title}" → task created (${insight.category})`
+    });
+
+    return res.status(201).json({
+      action: "task_created",
+      task,
+      navigate_to: `/tasks/${task.id}`
+    });
+  }
+
+  if (insight.action.type === "open_form") {
+    return res.json({
+      action: "open_form",
+      form_id: insight.action.form_id,
+      vehicle_id
+    });
+  }
+
+  if (insight.action.type === "run_recall_check") {
+    // Trigger the same recall lookup as the onboarding background promise.
+    const recall = await lookupRecallsByVehicle({
+      make: vehicle.make?.trim().toUpperCase() ?? null,
+      model: vehicle.model?.trim() ?? null,
+      modelYear: vehicle.year
+    });
+
+    if (recall.campaigns.length) {
+      await supabaseAdmin.from("recalls").upsert(
+        recall.campaigns.map((c) => ({
+          user_id: req.user!.id,
+          vehicle_id,
+          nhtsa_campaign_id: c.nhtsa_campaign_id,
+          summary: c.summary,
+          component: c.component,
+          consequence: c.consequence,
+          remedy: c.remedy,
+          reported_at: c.reported_at
+        })),
+        { onConflict: "vehicle_id,nhtsa_campaign_id", ignoreDuplicates: true }
+      );
+    }
+    await supabaseAdmin
+      .from("vehicles")
+      .update({ recall_status: recall.hasOpenRecall ? "open" : "clear" })
+      .eq("id", vehicle_id);
+
+    return res.json({
+      action: "recall_check_run",
+      recall_status: recall.hasOpenRecall ? "open" : "clear",
+      campaign_count: recall.campaigns.length
+    });
+  }
+
+  return res.status(400).json({ error: "Unsupported action type" });
+});
+
+// ---------- Documents (image upload + AI extraction) ----------
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10 MB
+});
+
+router.post("/api/documents", upload.single("file"), async (req, res) => {
+  const file = (req as any).file as Express.Multer.File | undefined;
+  if (!file) return res.status(400).json({ error: "No file uploaded" });
+
+  const schema = z.object({
+    document_kind: z.enum([
+      "insurance_dec_page",
+      "loan_statement",
+      "lease_agreement",
+      "registration",
+      "recall_notice",
+      "service_record",
+      "sale_paperwork",
+      "other"
+    ]),
+    vehicle_id: z.string().uuid().optional()
+  });
+  const { document_kind, vehicle_id } = schema.parse(req.body);
+
+  const allowed = ["image/jpeg", "image/png", "image/webp", "image/heic", "application/pdf"];
+  if (!allowed.includes(file.mimetype)) {
+    return res.status(415).json({ error: `Unsupported mime type: ${file.mimetype}` });
+  }
+
+  const doc = await uploadDocument({
+    userId: req.user!.id,
+    vehicleId: vehicle_id ?? null,
+    documentKind: document_kind as DocumentKind,
+    fileName: file.originalname,
+    mimeType: file.mimetype,
+    buffer: file.buffer
+  });
+
+  await audit({
+    userId: req.user!.id,
+    vehicleId: vehicle_id,
+    eventType: "document_uploaded",
+    summary: `Uploaded ${document_kind}: ${file.originalname}`
+  });
+
+  // Trigger extraction asynchronously
+  void extractDocument(doc.id).catch((err) =>
+    console.error(`[documents] extraction failed for ${doc.id}`, err)
+  );
+
+  return res.status(201).json({ document: doc });
+});
+
+router.get("/api/documents/:id", async (req, res) => {
+  const id = z.string().uuid().parse(req.params.id);
+  const { data, error } = await req
+    .db!.from("uploaded_documents")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) return res.status(400).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: "Not found" });
+  return res.json({ document: data });
+});
+
+router.post("/api/documents/:id/apply", async (req, res) => {
+  const id = z.string().uuid().parse(req.params.id);
+  const schema = z.object({ vehicle_id: z.string().uuid() });
+  const { vehicle_id } = schema.parse(req.body);
+
+  const result = await applyExtractedDocument({
+    userId: req.user!.id,
+    documentId: id,
+    vehicleId: vehicle_id
+  });
+
+  await audit({
+    userId: req.user!.id,
+    vehicleId: vehicle_id,
+    eventType: "document_applied",
+    summary: `Applied document fields: ${result.applied.join(", ")}`
+  });
+
+  return res.json(result);
+});
+
+// ---------- MCP token issuance (used from web app to generate a paste-able token) ----------
+
+router.post("/api/mcp/tokens", async (req, res) => {
+  const schema = z.object({ client_name: z.string().min(1).max(100).default("MCP Client") });
+  const { client_name } = schema.parse(req.body ?? {});
+
+  const rawToken = `aev_${randomBytes(32).toString("base64url")}`;
+  const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+
+  const { error } = await supabaseAdmin.from("mcp_connections").insert({
+    user_id: req.user!.id,
+    client_name,
+    access_token_hash: tokenHash,
+    scopes: ["read:vehicle", "read:recommendations", "write:tasks"]
+  });
+  if (error) return res.status(400).json({ error: error.message });
+
+  await audit({
+    userId: req.user!.id,
+    eventType: "mcp_token_issued",
+    summary: `Issued MCP token for ${client_name}`
+  });
+
+  // Return raw token ONCE
+  return res.status(201).json({ access_token: rawToken, token_type: "bearer", client_name });
+});
+
+router.get("/api/mcp/connections", async (req, res) => {
+  const { data } = await req
+    .db!.from("mcp_connections")
+    .select("id, client_name, scopes, expires_at, last_used_at, created_at, revoked_at")
+    .eq("user_id", req.user!.id)
+    .order("created_at", { ascending: false });
+  return res.json({ connections: data ?? [] });
+});
+
+router.post("/api/mcp/connections/:id/revoke", async (req, res) => {
+  const id = z.string().uuid().parse(req.params.id);
+  await supabaseAdmin
+    .from("mcp_connections")
+    .update({ revoked_at: new Date().toISOString() })
+    .eq("id", id)
+    .eq("user_id", req.user!.id);
+  return res.json({ revoked: id });
 });
 
 // ---------- Helpers ----------
