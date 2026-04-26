@@ -42,6 +42,20 @@ import type {
   Vehicle
 } from "./types";
 
+// Task types that go through the discovery + dispatch flow.
+// Must match isDispatchable() in apps/api/src/services/dealer-discovery.ts.
+const DISPATCHABLE_TASK_TYPES = new Set([
+  "recall_repair",
+  "service_quote",
+  "insurance_quote",
+  "refinance",
+  "sell_vehicle"
+]);
+
+function isDispatchableTaskType(t: string | null | undefined): boolean {
+  return Boolean(t && DISPATCHABLE_TASK_TYPES.has(t));
+}
+
 type Tab = "status" | "tasks" | "command" | "history" | "settings";
 type FormId = "insurance" | "loan" | "fuel" | "preferred_shop";
 
@@ -169,6 +183,35 @@ function Product({ session }: { session: Session }) {
   const [actBusyKey, setActBusyKey] = useState<string | null>(null);
   const [initialLoaded, setInitialLoaded] = useState(false);
   const [dispatch, setDispatch] = useState<DispatchPayload | null>(null);
+  const [openingDispatchTaskId, setOpeningDispatchTaskId] = useState<string | null>(null);
+
+  /**
+   * Open the DispatchModal for an existing task. Used when the user clicks
+   * "Approve & contact dealers" on a dispatchable task card. Hits the
+   * /dispatch-preview endpoint which re-runs discovery + drafts the email.
+   */
+  async function openDispatchForTask(taskId: string) {
+    setOpeningDispatchTaskId(taskId);
+    try {
+      const result = await api<{
+        action: string;
+        task: Task;
+        providers: DispatchProvider[];
+        preferred_provider_id: string | null;
+        email_preview: { subject: string; body: string };
+      }>(`/api/tasks/${taskId}/dispatch-preview`);
+      setDispatch({
+        task: result.task,
+        providers: result.providers,
+        preferred_provider_id: result.preferred_provider_id,
+        email_preview: result.email_preview
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not open dispatch.");
+    } finally {
+      setOpeningDispatchTaskId(null);
+    }
+  }
 
   async function refresh() {
     setBusy(true);
@@ -342,6 +385,8 @@ function Product({ session }: { session: Session }) {
           onActOnInsight={actOnInsight}
           actBusyKey={actBusyKey}
           onRefresh={refresh}
+          onOpenDispatch={openDispatchForTask}
+          openingDispatchTaskId={openingDispatchTaskId}
         />
       )}
       {tab === "command" && selectedId && <Command vehicleId={selectedId} onCreated={refresh} />}
@@ -1039,7 +1084,9 @@ function TaskCenter({
   highlightTaskId,
   onActOnInsight,
   actBusyKey,
-  onRefresh
+  onRefresh,
+  onOpenDispatch,
+  openingDispatchTaskId
 }: {
   dashboard: Dashboard;
   tasks: Task[];
@@ -1049,6 +1096,8 @@ function TaskCenter({
   onActOnInsight: (i: Insight) => void;
   actBusyKey: string | null;
   onRefresh: () => void;
+  onOpenDispatch: (taskId: string) => void;
+  openingDispatchTaskId: string | null;
 }) {
   const groups = useMemo(
     () => ({
@@ -1091,25 +1140,66 @@ function TaskCenter({
         {groups.active.length === 0 ? (
           <p className="muted">No active tasks. Tap a recommendation above to get started.</p>
         ) : (
-          groups.active.map((task) => (
-            <article
-              className={`task-card ${task.id === highlightTaskId ? "highlight" : ""}`}
-              key={task.id}
-            >
-              <div className="task-title"><Wrench size={17} /> {task.title}</div>
-              <div className={`status-chip status-${task.status}`}>{task.status.replaceAll("_", " ")}</div>
-              {task.approval_summary && <p>{task.approval_summary}</p>}
-              {task.shared_fields?.length ? (
-                <p className="muted small">Shared after approval: {task.shared_fields.join(", ")}</p>
-              ) : null}
-              {task.status === "needs_user_approval" && (
-                <div className="button-row">
-                  <button className="primary" onClick={() => approve(task, true)}>Approve</button>
-                  <button className="ghost" onClick={() => approve(task, false)}>Cancel</button>
-                </div>
-              )}
-            </article>
-          ))
+          groups.active.map((task) => {
+            const dispatchable = isDispatchableTaskType(task.task_type);
+            const opening = openingDispatchTaskId === task.id;
+            return (
+              <article
+                className={`task-card ${task.id === highlightTaskId ? "highlight" : ""}`}
+                key={task.id}
+              >
+                <div className="task-title"><Wrench size={17} /> {task.title}</div>
+                <div className={`status-chip status-${task.status}`}>{task.status.replaceAll("_", " ")}</div>
+                {task.approval_summary && <p>{task.approval_summary}</p>}
+                {task.shared_fields?.length ? (
+                  <p className="muted small">Shared after approval: {task.shared_fields.join(", ")}</p>
+                ) : null}
+
+                {/* needs_user_approval: dispatchable tasks open the DispatchModal,
+                    everything else uses the simple Approve/Cancel two-tap path. */}
+                {task.status === "needs_user_approval" && dispatchable && (
+                  <div className="button-row">
+                    <button
+                      className="primary"
+                      onClick={() => onOpenDispatch(task.id)}
+                      disabled={opening}
+                    >
+                      {opening ? (
+                        <><Loader2 size={16} className="spinner" /> Finding dealers…</>
+                      ) : (
+                        <><Send size={16} /> Approve &amp; contact dealers</>
+                      )}
+                    </button>
+                    <button className="ghost" onClick={() => approve(task, false)} disabled={opening}>Cancel</button>
+                  </div>
+                )}
+                {task.status === "needs_user_approval" && !dispatchable && (
+                  <div className="button-row">
+                    <button className="primary" onClick={() => approve(task, true)}>Approve</button>
+                    <button className="ghost" onClick={() => approve(task, false)}>Cancel</button>
+                  </div>
+                )}
+
+                {/* approved + dispatchable: surface a "contact dealers" CTA so users
+                    aren't stranded if they hit Approve via an older code path. */}
+                {task.status === "approved" && dispatchable && (
+                  <div className="button-row">
+                    <button
+                      className="primary"
+                      onClick={() => onOpenDispatch(task.id)}
+                      disabled={opening}
+                    >
+                      {opening ? (
+                        <><Loader2 size={16} className="spinner" /> Finding dealers…</>
+                      ) : (
+                        <><Send size={16} /> Contact dealers</>
+                      )}
+                    </button>
+                  </div>
+                )}
+              </article>
+            );
+          })
         )}
       </div>
     </section>
