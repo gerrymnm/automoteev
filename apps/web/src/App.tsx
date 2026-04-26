@@ -12,6 +12,7 @@ import {
   Info,
   Loader2,
   Lock,
+  LogOut,
   Mail,
   MapPin,
   Phone,
@@ -276,13 +277,23 @@ function Product({ session }: { session: Session }) {
           <div className="brand">Automoteev</div>
           <div className="muted small">Your AI agent for life's recurring expenses</div>
         </div>
-        <nav className="tabs desktop-only" aria-label="Main">
-          {(["status", "tasks", "command", "history", "settings"] as Tab[]).map((item) => (
-            <button className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>
-              {item}
-            </button>
-          ))}
-        </nav>
+        <div className="topbar-right">
+          <nav className="tabs desktop-only" aria-label="Main">
+            {(["status", "tasks", "command", "history", "settings"] as Tab[]).map((item) => (
+              <button className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>
+                {item}
+              </button>
+            ))}
+          </nav>
+          <button
+            className="signout-btn"
+            onClick={() => supabase.auth.signOut()}
+            aria-label="Sign out"
+            title={session.user.email ?? "Sign out"}
+          >
+            <LogOut size={14} /> Sign out
+          </button>
+        </div>
       </header>
 
       {error && <div className="notice error-notice">{error}</div>}
@@ -1707,6 +1718,14 @@ function Settings({ autonomy }: { autonomy: AutonomyStatus | null }) {
           Every important action is logged. External sharing requires approval that names who may be
           contacted and which fields may be shared. Phone numbers are never disclosed in outbound email.
         </p>
+
+        <h2 style={{ marginTop: 20 }}>Account</h2>
+        <p className="small muted">
+          Sign out of Automoteev on this device. Your data stays in your account and you can sign back in any time.
+        </p>
+        <button className="danger" type="button" onClick={() => supabase.auth.signOut()}>
+          <LogOut size={16} /> Sign out
+        </button>
       </div>
 
       <div className="panel coming-next">

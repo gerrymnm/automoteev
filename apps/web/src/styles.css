@@ -388,6 +388,44 @@ label.checkbox-row a {
 .small { font-size: 13px; }
 .muted { color: #637067; }
 
+/* ---------- Topbar sign-out ---------- */
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.signout-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  color: #4d5a53;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid #dce2d8;
+  cursor: pointer;
+}
+.signout-btn:hover { background: #f1f3ee; color: #1f2a25; }
+@media (max-width: 860px) {
+  .signout-btn { font-size: 12px; padding: 6px 10px; }
+}
+
+/* ---------- Danger button (for sign-out in Settings) ---------- */
+.danger {
+  background: white;
+  color: #923d25;
+  border: 1px solid #d99878;
+  border-radius: 6px;
+  padding: 10px 16px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.danger:hover { background: #fef0e8; }
+
 .spinner { animation: spin 1s linear infinite; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
@@ -683,11 +721,17 @@ label.checkbox-row a {
 .recall-nhtsa-link:hover { text-decoration: underline; }
 
 /* ---------- Mobile bottom nav ---------- */
-.mobile-only { display: none; }
+/*
+  IMPORTANT: .mobile-only must be set to display:none here, and .bottom-nav
+  must NOT set its own display property. Otherwise the .bottom-nav rule
+  overrides the .mobile-only hide on desktop and the bar leaks onto desktop.
+  We turn .mobile-only into `display: grid` ONLY inside the mobile media query.
+*/
+.mobile-only { display: none !important; }
 .bottom-nav {
   position: fixed; bottom: 0; left: 0; right: 0;
   background: white; border-top: 1px solid #dce2d8;
-  display: grid; grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   padding: 6px 4px 8px;
   z-index: 100;
   box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.06);
@@ -712,8 +756,8 @@ label.checkbox-row a {
   h1 { font-size: 36px; }
   h1.vehicle-title { font-size: 24px; line-height: 1.2; }
 
-  .desktop-only { display: none; }
-  .mobile-only { display: grid; }
+  .desktop-only { display: none !important; }
+  .mobile-only { display: grid !important; }
 
   .app-shell { padding-bottom: 80px; padding-top: 16px; width: calc(100% - 24px); }
   .panel, .status-hero { padding: 16px; border-radius: 10px; }
