@@ -473,6 +473,60 @@ label.checkbox-row a {
   100% { box-shadow: 0 0 0 3px rgba(23, 107, 93, 0.18); }
 }
 
+/* ---------- Recall items (expandable) ---------- */
+.recall-item {
+  border: 1px solid #e1e6dd;
+  border-radius: 8px;
+  background: #fbfcfa;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+.recall-item summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.recall-item summary::-webkit-details-marker { display: none; }
+.recall-item summary::marker { display: none; content: ""; }
+.recall-item summary:hover { background: #f1f3ee; }
+.recall-icon { color: #c5683b; flex-shrink: 0; margin-top: 2px; }
+.recall-summary-text {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.recall-summary-text strong {
+  font-size: 14px;
+  text-transform: capitalize;
+  word-break: break-word;
+}
+.recall-chev {
+  color: #67746b;
+  transition: transform 0.18s ease;
+  flex-shrink: 0;
+}
+.recall-item[open] .recall-chev { transform: rotate(90deg); }
+.recall-details {
+  padding: 12px 16px 14px;
+  border-top: 1px solid #e1e6dd;
+  background: white;
+}
+.recall-details p { margin: 6px 0; line-height: 1.5; }
+.recall-nhtsa-link {
+  display: inline-block;
+  margin-top: 8px;
+  color: #176b5d;
+  font-weight: 600;
+  text-decoration: none;
+}
+.recall-nhtsa-link:hover { text-decoration: underline; }
+
 /* ---------- Mobile bottom nav ---------- */
 .mobile-only { display: none; }
 .bottom-nav {

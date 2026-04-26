@@ -589,16 +589,41 @@ function ImprovementsPanel({
 function RecallList({ recalls }: { recalls: RecallRecord[] }) {
   return (
     <div className="sub-panel">
-      <h3>Open recalls</h3>
-      {recalls.slice(0, 3).map((r) => (
-        <div className="task-card" key={r.id}>
-          <div className="task-title"><AlertTriangle size={17} /> {r.component ?? "Recall campaign"}</div>
-          <div className="muted small">Campaign #{r.nhtsa_campaign_id}</div>
-          {r.summary && <p className="small">{truncate(r.summary, 220)}</p>}
-          {r.remedy && <p className="small"><strong>Remedy:</strong> {truncate(r.remedy, 180)}</p>}
-        </div>
+      <h3>Open recalls ({recalls.length})</h3>
+      <p className="small muted">Recall repairs are free at any authorized dealer. Tap any item to see what's affected.</p>
+      {recalls.map((r) => (
+        <details className="recall-item" key={r.id}>
+          <summary>
+            <AlertTriangle size={18} className="recall-icon" />
+            <div className="recall-summary-text">
+              <strong>{r.component ?? "Recall campaign"}</strong>
+              <span className="muted small">Campaign #{r.nhtsa_campaign_id}</span>
+            </div>
+            <ChevronRight size={18} className="recall-chev" />
+          </summary>
+          <div className="recall-details">
+            {r.summary && (
+              <p className="small"><strong>What's affected:</strong> {r.summary}</p>
+            )}
+            {r.remedy && (
+              <p className="small"><strong>Remedy:</strong> {r.remedy}</p>
+            )}
+            {r.reported_at && (
+              <p className="small muted">
+                Reported {new Date(r.reported_at).toLocaleDateString()}
+              </p>
+            )}
+            <a
+              className="small recall-nhtsa-link"
+              href={`https://www.nhtsa.gov/recalls?nhtsaId=${r.nhtsa_campaign_id}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              View on NHTSA ↗
+            </a>
+          </div>
+        </details>
       ))}
-      {recalls.length > 3 && <p className="muted small">+{recalls.length - 3} more in full history</p>}
     </div>
   );
 }
