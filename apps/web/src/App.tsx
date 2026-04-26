@@ -1340,8 +1340,9 @@ function DispatchModal({
         </div>
 
         <p className="small muted">
-          Automoteev will send this email to the dealers you select. You can swap any dealer,
-          edit the email it found, and pick which one becomes your preferred for next time.
+          Automoteev only emails dealers with a verified contact address found on their
+          website. Dealers without a published email show their phone and website so you
+          can reach out directly. Pick which dealer becomes your preferred for next time.
         </p>
 
         {/* Email preview */}
@@ -1374,27 +1375,33 @@ function DispatchModal({
             </p>
           )}
           {payload.providers.map((p) => {
-            const isSelected = selected.has(p.id);
-            const isPreferred = preferredId === p.id;
             const overrideEmail = emailOverrides[p.id];
             const effectiveEmail = overrideEmail ?? p.email;
-            const emailIsBestGuess =
-              p.derived_email_basis === "best_guess" && !overrideEmail;
+            const hasEmail = Boolean(effectiveEmail);
+            const isSelected = selected.has(p.id) && hasEmail;
+            const isPreferred = preferredId === p.id;
             return (
               <div
                 key={p.id}
-                className={`dealer-row ${isSelected ? "selected" : ""} ${isPreferred ? "preferred" : ""}`}
+                className={`dealer-row ${isSelected ? "selected" : ""} ${isPreferred ? "preferred" : ""} ${!hasEmail ? "no-email" : ""}`}
               >
-                <button
-                  type="button"
-                  className="dealer-toggle"
-                  onClick={() => toggle(p.id)}
-                  aria-pressed={isSelected}
-                >
-                  <span className={`checkbox ${isSelected ? "checked" : ""}`}>
-                    {isSelected && <CheckCircle2 size={14} />}
+                {hasEmail ? (
+                  <button
+                    type="button"
+                    className="dealer-toggle"
+                    onClick={() => toggle(p.id)}
+                    aria-pressed={isSelected}
+                    aria-label="Toggle send to this dealer"
+                  >
+                    <span className={`checkbox ${isSelected ? "checked" : ""}`}>
+                      {isSelected && <CheckCircle2 size={14} />}
+                    </span>
+                  </button>
+                ) : (
+                  <span className="dealer-toggle dealer-toggle-disabled" aria-hidden>
+                    <Phone size={16} />
                   </span>
-                </button>
+                )}
                 <div className="dealer-info">
                   <div className="dealer-name">
                     <strong>{p.name}</strong>
@@ -1404,6 +1411,11 @@ function DispatchModal({
                         {p.rating_count != null && (
                           <span className="muted"> ({p.rating_count})</span>
                         )}
+                      </span>
+                    )}
+                    {!hasEmail && (
+                      <span className="phone-only-badge" title="No verified email — reach out by phone or website">
+                        Phone / website only
                       </span>
                     )}
                   </div>
@@ -1427,7 +1439,12 @@ function DispatchModal({
                         defaultValue={effectiveEmail ?? ""}
                         className="dealer-email-input"
                         onBlur={(e) => {
-                          setEmailOverrides((prev) => ({ ...prev, [p.id]: e.target.value }));
+                          const v = e.target.value.trim();
+                          if (v) {
+                            setEmailOverrides((prev) => ({ ...prev, [p.id]: v }));
+                            // Auto-select once an email is added.
+                            setSelected((prev) => new Set(prev).add(p.id));
+                          }
                           setEditingEmailId(null);
                         }}
                         onKeyDown={(e) => {
@@ -1441,11 +1458,6 @@ function DispatchModal({
                     ) : effectiveEmail ? (
                       <span className="small">
                         {effectiveEmail}
-                        {emailIsBestGuess && (
-                          <span className="email-guess-badge" title="Best guess from website domain">
-                            ?
-                          </span>
-                        )}
                         <button
                           className="ghost small inline-edit"
                           type="button"
@@ -1456,13 +1468,13 @@ function DispatchModal({
                       </span>
                     ) : (
                       <span className="small muted">
-                        no email —
+                        no published email —
                         <button
                           className="ghost small inline-edit"
                           type="button"
                           onClick={() => setEditingEmailId(p.id)}
                         >
-                          add one
+                          add one manually
                         </button>
                       </span>
                     )}
@@ -1471,7 +1483,7 @@ function DispatchModal({
                     <div className="dealer-meta">
                       <ExternalLink size={12} />{" "}
                       <a href={p.website} target="_blank" rel="noreferrer" className="small">
-                        Website
+                        Visit website
                       </a>
                     </div>
                   )}

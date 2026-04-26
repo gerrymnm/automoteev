@@ -190,6 +190,14 @@ export async function recordApprovedSend(
 
 /**
  * Subscription gate for Pro-only features.
+ *
+ * Pro is granted by ANY of:
+ *   1. Active or trialing Stripe subscription (real customers)
+ *   2. profiles.plan = 'pro'                       (legacy / manual override)
+ *   3. profiles.is_test_pro = TRUE                  (internal test users)
+ *
+ * To grant test-pro to a user, run:
+ *   UPDATE profiles SET is_test_pro = TRUE WHERE id = '<user_id>';
  */
 export async function isPro(userId: string): Promise<boolean> {
   const { data: sub } = await supabaseAdmin
@@ -201,10 +209,12 @@ export async function isPro(userId: string): Promise<boolean> {
 
   const { data: profile } = await supabaseAdmin
     .from("profiles")
-    .select("plan")
+    .select("plan, is_test_pro")
     .eq("id", userId)
     .maybeSingle();
-  return profile?.plan === "pro";
+  if (!profile) return false;
+  if ((profile as any).is_test_pro === true) return true;
+  return (profile as any).plan === "pro";
 }
 
 export async function getProfile(userId: string): Promise<Profile | null> {

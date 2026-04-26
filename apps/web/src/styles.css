@@ -517,7 +517,24 @@ label.checkbox-row a {
 .dealer-row.selected { border-color: #176b5d; background: #f0f6ed; }
 .dealer-row.preferred { box-shadow: 0 0 0 2px rgba(212, 168, 79, 0.4); border-color: #d5a84f; }
 .dealer-row.preferred.selected { background: #fff8df; }
+.dealer-row.no-email { background: #f6f4ee; opacity: 0.85; }
+.dealer-row.no-email .dealer-name strong { color: #4d5a53; }
 .dealer-toggle { background: transparent; padding: 0; flex-shrink: 0; line-height: 0; }
+.dealer-toggle-disabled {
+  width: 22px; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: #9aa494;
+}
+.phone-only-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  background: #eef2ea; color: #4d5a53;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
 .checkbox {
   width: 22px; height: 22px;
   border: 2px solid #ccd5c8; border-radius: 6px;
@@ -545,16 +562,7 @@ label.checkbox-row a {
   flex: 1 1 auto; min-width: 0;
   font-size: 13px; padding: 4px 8px;
 }
-.email-guess-badge {
-  display: inline-block;
-  margin-left: 4px;
-  padding: 0 6px;
-  background: #fff0c7; color: #7a5a10;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 700;
-  cursor: help;
-}
+.email-guess-badge { display: none; } /* deprecated — we no longer guess emails */
 .inline-edit { padding: 2px 6px !important; min-height: auto !important; margin-left: 6px; font-size: 12px !important; color: #176b5d !important; }
 .preferred-radio {
   margin-top: 4px;

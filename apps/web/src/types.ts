@@ -118,7 +118,8 @@ export interface Provider {
 }
 
 export interface DispatchProvider extends Provider {
-  derived_email_basis?: "verified" | "best_guess" | "none";
+  /** "verified" = email scraped from dealer's site; "none" = no email available */
+  derived_email_basis?: "verified" | "none";
   rating?: number | null;
   rating_count?: number | null;
   website?: string | null;
