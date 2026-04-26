@@ -366,6 +366,7 @@ async function buildDashboardData(userId: string, vehicleId: string) {
       title: i.title,
       body: i.body,
       cta_label: i.cta_label,
+      action: i.action,
       action_type: i.action.type,
       estimated_savings_usd_per_year: i.estimated_savings_usd_per_year ?? null
     })),
