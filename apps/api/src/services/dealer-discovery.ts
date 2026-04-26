@@ -152,7 +152,7 @@ async function scrapeEmailFromUrl(url: string): Promise<string | null> {
     const mailtoMatch = html.match(
       /mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i
     );
-    if (mailtoMatch) {
+    if (mailtoMatch && mailtoMatch[1]) {
       const candidate = mailtoMatch[1].toLowerCase().trim();
       if (isValidEmail(candidate) && !isJunkEmail(candidate)) return candidate;
     }
@@ -174,7 +174,7 @@ async function scrapeEmailFromUrl(url: string): Promise<string | null> {
       const match = filtered.find((e) => e.startsWith(pref));
       if (match) return match;
     }
-    return filtered[0];
+    return filtered[0] ?? null;
   } catch {
     return null;
   }
