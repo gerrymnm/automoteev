@@ -1792,8 +1792,31 @@ async function buildDispatchPayload(
   return {
     providers,
     preferred_provider_id: (existingPreferred as any)?.id ?? null,
-    email_preview: { subject, body }
+    email_preview: { subject, body },
+    // Insurance providers need a DL number/state to issue a real quote.
+    // Surface this to the frontend so the UI can collect it before dispatch
+    // instead of bouncing the user halfway through. Only insurance_quote
+    // requires it; other dispatchable types don't.
+    requires_dl: await isDlRequiredForTask(userId, taskType)
   };
+}
+
+/**
+ * Returns true if the user is missing a DL on file AND this task type needs
+ * one for providers to issue a quote. Today: insurance_quote only.
+ */
+async function isDlRequiredForTask(
+  userId: string,
+  taskType: DispatchableTaskType
+): Promise<boolean> {
+  if (taskType !== "insurance_quote") return false;
+  const pii = await one(
+    supabaseAdmin
+      .from("user_pii")
+      .select("dl_collected_at")
+      .eq("user_id", userId)
+  );
+  return !(pii as any)?.dl_collected_at;
 }
 
 router.get("/api/tasks/:id/dispatch-preview", async (req, res) => {

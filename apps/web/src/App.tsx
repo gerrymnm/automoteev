@@ -646,6 +646,11 @@ function Product({ session }: { session: Session }) {
   // in flight, we switch to the History tab and auto-expand the relevant task
   // so they see the email thread immediately instead of having to hunt for it.
   const [historyAutoExpandTaskId, setHistoryAutoExpandTaskId] = useState<string | null>(null);
+  // Just-in-time DL collection: when an insurance dispatch requires a DL we
+  // hold the pending dispatch payload here and show DLPromptModal first. After
+  // the user saves their DL we re-fetch the dispatch preview (now requires_dl=false)
+  // and open the regular DispatchModal.
+  const [pendingInsuranceDispatch, setPendingInsuranceDispatch] = useState<DispatchPayload | null>(null);
 
   function viewSentEmail(taskId: string) {
     setHistoryAutoExpandTaskId(taskId);
@@ -656,6 +661,10 @@ function Product({ session }: { session: Session }) {
    * Open the DispatchModal for an existing task. Used when the user clicks
    * "Approve & contact dealers" on a dispatchable task card. Hits the
    * /dispatch-preview endpoint which re-runs discovery + drafts the email.
+   *
+   * If the task is insurance and requires a DL, we route to the DL prompt
+   * first. After DL is saved, this function is called again and the second
+   * preview will return requires_dl=false.
    */
   async function openDispatchForTask(taskId: string) {
     setOpeningDispatchTaskId(taskId);
@@ -666,17 +675,33 @@ function Product({ session }: { session: Session }) {
         providers: DispatchProvider[];
         preferred_provider_id: string | null;
         email_preview: { subject: string; body: string };
+        requires_dl?: boolean;
       }>(`/api/tasks/${taskId}/dispatch-preview`);
-      setDispatch({
+      const payload: DispatchPayload = {
         task: result.task,
         providers: result.providers,
         preferred_provider_id: result.preferred_provider_id,
-        email_preview: result.email_preview
-      });
+        email_preview: result.email_preview,
+        requires_dl: result.requires_dl
+      };
+      if (result.requires_dl) {
+        setPendingInsuranceDispatch(payload);
+      } else {
+        setDispatch(payload);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not open dispatch.");
     } finally {
       setOpeningDispatchTaskId(null);
+    }
+  }
+
+  /** Called by DLPromptModal after user saves DL. Re-fetch + open dispatch. */
+  async function onDlCollected() {
+    const pending = pendingInsuranceDispatch;
+    setPendingInsuranceDispatch(null);
+    if (pending) {
+      await openDispatchForTask(pending.task.id);
     }
   }
 
@@ -734,13 +759,19 @@ function Product({ session }: { session: Session }) {
       });
 
       if (result.action === "open_dispatch" && result.task && result.providers && result.email_preview) {
-        setDispatch({
+        const payload: DispatchPayload = {
           task: result.task,
           providers: result.providers,
           preferred_provider_id: result.preferred_provider_id ?? null,
           email_preview: result.email_preview,
-          already_existed: result.already_existed
-        });
+          already_existed: result.already_existed,
+          requires_dl: (result as any).requires_dl
+        };
+        if ((result as any).requires_dl) {
+          setPendingInsuranceDispatch(payload);
+        } else {
+          setDispatch(payload);
+        }
       } else if (result.action === "task_created" && result.task) {
         setHighlightTaskId(result.task.id);
         setTab("tasks");
@@ -830,6 +861,13 @@ function Product({ session }: { session: Session }) {
             setTab("tasks");
             await refresh();
           }}
+        />
+      )}
+
+      {pendingInsuranceDispatch && (
+        <DLPromptModal
+          onClose={() => setPendingInsuranceDispatch(null)}
+          onSaved={onDlCollected}
         />
       )}
 
@@ -2410,6 +2448,116 @@ function DispatchModal({
     </div>
   );
 }
+
+// ============================================================
+// DL PROMPT MODAL (just-in-time DL collection for insurance)
+// ============================================================
+//
+// Shown right before the insurance dispatch modal when the user has not yet
+// provided a driver's license. Insurance carriers cannot generate a real
+// quote without a DL number + state, so collecting it here saves a round-trip
+// where the dealer would email back asking for it.
+//
+// On save, we PUT /api/pii with the DL fields (encrypted server-side) and
+// invoke onSaved which re-fetches the dispatch-preview (now with
+// requires_dl=false) and opens the regular DispatchModal.
+function DLPromptModal({
+  onClose,
+  onSaved
+}: {
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [dlNumber, setDlNumber] = useState("");
+  const [dlState, setDlState] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    setError(null);
+    if (!dlNumber.trim() || dlState.trim().length !== 2) {
+      setError("Enter your DL number and 2-letter state.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api("/api/pii", {
+        method: "PUT",
+        body: JSON.stringify({
+          dl_number: dlNumber.trim(),
+          dl_state: dlState.trim().toUpperCase()
+        })
+      });
+      onSaved();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save DL.");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal dl-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <h2>One quick thing before quotes go out</h2>
+          <button className="ghost icon-button" onClick={onClose} aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+
+        <p className="small">
+          Insurance carriers can't generate a real quote without your driver's
+          license. We encrypt this on the server and only share it with carriers
+          you explicitly approve.
+        </p>
+
+        <div className="trust-row small dl-trust-row">
+          <Lock size={14} /> Encrypted at rest. Never displayed in outbound email.
+        </div>
+
+        <div className="form-grid">
+          <Field
+            label="Driver's license number"
+            value={dlNumber}
+            onChange={setDlNumber}
+            required
+            placeholder="e.g. C1234567"
+          />
+          <label>State of issue
+            <select value={dlState} onChange={(e) => setDlState(e.target.value)}>
+              <option value="">—</option>
+              {US_STATES.map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        {error && <div className="error">{error}</div>}
+
+        <div className="button-row">
+          <button className="primary" type="button" onClick={save} disabled={busy}>
+            {busy ? (
+              <><Loader2 size={16} className="spinner" /> Saving…</>
+            ) : (
+              <><CheckCircle2 size={16} /> Save and continue</>
+            )}
+          </button>
+          <button className="ghost" type="button" onClick={onClose} disabled={busy}>
+            Not now
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const US_STATES = [
+  "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA",
+  "KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ",
+  "NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT",
+  "VA","WA","WV","WI","WY","DC"
+];
 
 // ============================================================
 // COMMAND TAB

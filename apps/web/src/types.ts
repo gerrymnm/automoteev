@@ -133,6 +133,8 @@ export interface DispatchPayload {
   preferred_provider_id: string | null;
   email_preview: { subject: string; body: string };
   already_existed?: boolean;
+  /** True if a DL must be collected before this task can dispatch (insurance only). */
+  requires_dl?: boolean;
 }
 
 export interface MaintenanceItem {

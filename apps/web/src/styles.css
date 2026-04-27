@@ -1052,6 +1052,22 @@ label.checkbox-row a {
   .modal { padding: 20px; }
 }
 
+/* DL prompt modal */
+.dl-modal {
+  max-width: 440px;
+}
+.dl-trust-row {
+  background: #d8ebdc;
+  border: 1px solid #a8d2b3;
+  color: #1f4a2c;
+  padding: 8px 12px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 12px 0;
+}
+
 /* ============================================================
    PUBLIC MARKETING PAGES
    ============================================================ */
