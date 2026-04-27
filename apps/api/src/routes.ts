@@ -37,6 +37,7 @@ import { createProCheckoutSession } from "./services/stripe.js";
 import { searchProviders } from "./services/places.js";
 import { discoverProvidersForTask, isDispatchable, type DispatchableTaskType } from "./services/dealer-discovery.js";
 import { pickProviderEmailForDept, taskTypeToContactDept } from "./services/contacts.js";
+import { subscribePush, unsubscribePush, sendPushToUser } from "./services/push.js";
 import { getGasPrice, getMaintenanceCost } from "./services/market.js";
 import { assignAgentEmailLocal, composeAgentAddress } from "./services/alias.js";
 import {
@@ -1626,6 +1627,98 @@ router.post("/api/mcp/connections/:id/revoke", async (req, res) => {
     .eq("id", id)
     .eq("user_id", req.user!.id);
   return res.json({ revoked: id });
+});
+
+// ---------- Push Notifications (PWA web push) ----------
+
+/**
+ * Returns the VAPID public key + whether push is configured on this server.
+ * The frontend needs the public key to subscribe a browser. We also expose
+ * the configured flag so the UI can hide the subscribe button entirely on
+ * environments where keys aren't set.
+ */
+router.get("/api/push/vapid-key", async (_req, res) => {
+  return res.json({
+    public_key: env.VAPID_PUBLIC_KEY ?? null,
+    configured: Boolean(env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY)
+  });
+});
+
+/**
+ * Save (upsert) a browser push subscription for the current user.
+ * Endpoint is the unique key — re-subscribing on the same device updates
+ * rather than duplicates. Auth and p256dh come from the browser's
+ * PushSubscription.toJSON() output.
+ */
+router.post("/api/push/subscribe", async (req, res) => {
+  const schema = z.object({
+    endpoint: z.string().url(),
+    keys: z.object({
+      p256dh: z.string().min(1),
+      auth: z.string().min(1)
+    })
+  });
+  const { endpoint, keys } = schema.parse(req.body);
+  const userAgent = req.header("user-agent") ?? null;
+
+  await subscribePush({
+    userId: req.user!.id,
+    endpoint,
+    p256dh: keys.p256dh,
+    auth: keys.auth,
+    userAgent
+  });
+
+  await audit({
+    userId: req.user!.id,
+    eventType: "push_subscribed",
+    summary: "Push notification subscription added"
+  });
+
+  return res.status(201).json({ subscribed: true });
+});
+
+/**
+ * Remove a single subscription (the device the user is currently signing
+ * out of, or one they tapped "unsubscribe" on). Idempotent.
+ */
+router.delete("/api/push/subscribe", async (req, res) => {
+  const schema = z.object({ endpoint: z.string().url() });
+  const { endpoint } = schema.parse(req.body);
+  await unsubscribePush({ userId: req.user!.id, endpoint });
+  return res.json({ unsubscribed: true });
+});
+
+/**
+ * Quick "is this device subscribed" + count of total active subs across
+ * all devices. UI uses this to render the right toggle state.
+ */
+router.get("/api/push/status", async (req, res) => {
+  const endpoint = typeof req.query.endpoint === "string" ? req.query.endpoint : null;
+  const { data: subs } = await req
+    .db!.from("push_subscriptions")
+    .select("endpoint")
+    .eq("user_id", req.user!.id)
+    .is("failed_at", null);
+  const all = (subs ?? []).map((s: any) => s.endpoint as string);
+  return res.json({
+    active_count: all.length,
+    this_device_subscribed: endpoint ? all.includes(endpoint) : false
+  });
+});
+
+/**
+ * Send a test push to all of the user's subscriptions. Used by the Settings
+ * UI to verify the end-to-end pipeline is working.
+ */
+router.post("/api/push/test", async (req, res) => {
+  const delivered = await sendPushToUser(req.user!.id, {
+    title: "Automoteev test notification",
+    body: "If you see this, push notifications are working.",
+    url: "/app?tab=settings",
+    tag: "test"
+  });
+  return res.json({ delivered });
 });
 
 // ---------- Dispatch (send approved task to many providers in one go) ----------

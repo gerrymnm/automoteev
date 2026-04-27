@@ -3,6 +3,8 @@ import type { Session } from "@supabase/supabase-js";
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation, Link } from "react-router-dom";
 import {
   AlertTriangle,
+  Bell,
+  BellOff,
   Camera,
   CheckCircle2,
   ChevronRight,
@@ -800,6 +802,22 @@ function Product({ session }: { session: Session }) {
     }, 30_000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Deep-link from a push notification: when the user taps a "dealer replied"
+  // notification, the service worker opens /app?tab=history&task=<id>. We
+  // parse those params on mount, switch to the right tab, expand the task,
+  // then strip the params so a refresh doesn't re-trigger the deep-link.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const requestedTab = params.get("tab");
+    const requestedTask = params.get("task");
+    if (requestedTab === "history") {
+      setTab("history");
+      if (requestedTask) setHistoryAutoExpandTaskId(requestedTask);
+      // Clean up the URL so future renders don't keep applying the deep-link.
+      window.history.replaceState({}, "", "/app");
+    }
   }, []);
 
   // Don't decide between Onboarding vs Status until the first fetch completes —
@@ -2885,6 +2903,205 @@ function humanizeEventType(eventType: string): string {
 }
 
 // ============================================================
+// PUSH NOTIFICATIONS PANEL (Settings tab)
+// ============================================================
+//
+// Shown inside Settings. Lets the user opt in to web push so the agent can
+// notify them ambiently when a dealer/carrier replies, without requiring
+// the app to be open.
+//
+// Browser API path:
+//   1. Service worker registers (in main.tsx) and exposes pushManager
+//   2. Notification.requestPermission() — requires a user gesture to fire
+//   3. pushManager.subscribe({ applicationServerKey }) — returns a sub object
+//   4. POST that sub object to /api/push/subscribe
+//
+// Push doesn't work in private/incognito (browser silently blocks the
+// service worker registration). We surface that as "not supported" rather
+// than letting the toggle silently no-op.
+
+function urlBase64ToUint8Array(base64: string): Uint8Array {
+  // Web Push expects the applicationServerKey as a Uint8Array. VAPID public
+  // keys come in URL-safe base64; convert to standard base64 then decode.
+  const padding = "=".repeat((4 - (base64.length % 4)) % 4);
+  const standard = (base64 + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(standard);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+function PushNotificationPanel() {
+  const [supported] = useState(
+    () => typeof window !== "undefined" && "serviceWorker" in navigator && "PushManager" in window
+  );
+  const [subscribed, setSubscribed] = useState<boolean | null>(null);
+  const [permission, setPermission] = useState<NotificationPermission | null>(
+    () => (typeof Notification !== "undefined" ? Notification.permission : null)
+  );
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  // On mount, check if this browser already has an active subscription.
+  useEffect(() => {
+    if (!supported) return;
+    void (async () => {
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        const sub = await reg.pushManager.getSubscription();
+        setSubscribed(Boolean(sub));
+      } catch {
+        setSubscribed(false);
+      }
+    })();
+  }, [supported]);
+
+  async function enable() {
+    setBusy(true);
+    setMessage(null);
+    try {
+      // 1. Get VAPID public key from server (so we don't have to bake it into the bundle).
+      const { public_key, configured } = await api<{ public_key: string | null; configured: boolean }>(
+        "/api/push/vapid-key"
+      );
+      if (!configured || !public_key) {
+        setMessage("Push is not configured on the server yet.");
+        return;
+      }
+
+      // 2. Ensure permission. requestPermission must be triggered by a user gesture
+      //    (this onClick handler counts).
+      let perm = Notification.permission;
+      if (perm === "default") {
+        perm = await Notification.requestPermission();
+      }
+      setPermission(perm);
+      if (perm !== "granted") {
+        setMessage(
+          perm === "denied"
+            ? "Notifications are blocked for this site. Enable them in your browser settings to turn this on."
+            : "Permission was not granted."
+        );
+        return;
+      }
+
+      // 3. Subscribe via the service worker's push manager.
+      const reg = await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(public_key)
+        });
+      }
+
+      // 4. Send the subscription to the backend so it can push to this device later.
+      const subJson = sub.toJSON() as { endpoint?: string; keys?: { p256dh: string; auth: string } };
+      if (!subJson.endpoint || !subJson.keys?.p256dh || !subJson.keys?.auth) {
+        throw new Error("Browser returned an incomplete subscription");
+      }
+      await api("/api/push/subscribe", {
+        method: "POST",
+        body: JSON.stringify({
+          endpoint: subJson.endpoint,
+          keys: { p256dh: subJson.keys.p256dh, auth: subJson.keys.auth }
+        })
+      });
+      setSubscribed(true);
+      setMessage("Notifications enabled on this device.");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Could not enable notifications.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disable() {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) {
+        await api("/api/push/subscribe", {
+          method: "DELETE",
+          body: JSON.stringify({ endpoint: sub.endpoint })
+        });
+        await sub.unsubscribe();
+      }
+      setSubscribed(false);
+      setMessage("Notifications disabled on this device.");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Could not disable notifications.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendTest() {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const result = await api<{ delivered: number }>("/api/push/test", { method: "POST" });
+      setMessage(
+        result.delivered > 0
+          ? `Test sent. Delivered to ${result.delivered} device${result.delivered === 1 ? "" : "s"}.`
+          : "Test sent but no devices received it. Make sure notifications are enabled in this browser."
+      );
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Test push failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!supported) {
+    return (
+      <>
+        <h2 style={{ marginTop: 20 }}>Notifications</h2>
+        <p className="small muted">
+          This browser doesn't support push notifications. Try Chrome, Edge, or Firefox —
+          or open Automoteev in a regular (non-private) window.
+        </p>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <h2 style={{ marginTop: 20 }}>Notifications</h2>
+      <p className="small muted">
+        Get an instant ping the moment a dealer or carrier replies — even when the app
+        isn't open. Works on this device's browser.
+      </p>
+      <div className="button-row">
+        {subscribed ? (
+          <>
+            <button className="secondary" type="button" onClick={disable} disabled={busy}>
+              <BellOff size={16} /> {busy ? "Working…" : "Turn off on this device"}
+            </button>
+            <button className="ghost" type="button" onClick={sendTest} disabled={busy}>
+              {busy ? <Loader2 size={14} className="spinner" /> : "Send test push"}
+            </button>
+          </>
+        ) : (
+          <button className="primary" type="button" onClick={enable} disabled={busy}>
+            <Bell size={16} /> {busy ? "Enabling…" : "Enable notifications"}
+          </button>
+        )}
+      </div>
+      {permission === "denied" && (
+        <p className="small muted" style={{ marginTop: 8 }}>
+          Notifications are blocked for this site in your browser. Click the lock
+          icon in the address bar to allow them.
+        </p>
+      )}
+      {message && <div className="notice" style={{ marginTop: 8 }}>{message}</div>}
+    </>
+  );
+}
+
+// ============================================================
 // SETTINGS TAB
 // ============================================================
 function Settings({ autonomy }: { autonomy: AutonomyStatus | null }) {
@@ -2959,6 +3176,8 @@ function Settings({ autonomy }: { autonomy: AutonomyStatus | null }) {
           Every important action is logged. External sharing requires approval that names who may be
           contacted and which fields may be shared. Phone numbers are never disclosed in outbound email.
         </p>
+
+        <PushNotificationPanel />
 
         <h2 style={{ marginTop: 20 }}>Account</h2>
         <p className="small muted">

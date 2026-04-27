@@ -5,6 +5,7 @@ import { env } from "./config.js";
 import { supabaseAdmin } from "./supabase.js";
 import { stripe, verifyStripeWebhook } from "./services/stripe.js";
 import { taskTypeToContactDept, shouldLearnContact } from "./services/contacts.js";
+import { sendPushToUser } from "./services/push.js";
 
 export const webhooks = Router();
 
@@ -227,6 +228,38 @@ webhooks.post("/webhooks/email/inbound", async (req: Request, res: Response) => 
   });
 
   console.log("[inbound] stored email for user:", profile.id);
+
+  // Push notification: this is the moment the user has been waiting for —
+  // someone replied. Fire an ambient notification to all their devices so
+  // they see it immediately, even with the app closed. Best-effort —
+  // failures are logged in sendPushToUser and don't fail the webhook.
+  try {
+    let providerName: string | null = null;
+    if (providerId) {
+      const { data: providerRow } = await supabaseAdmin
+        .from("providers")
+        .select("name")
+        .eq("id", providerId)
+        .maybeSingle();
+      providerName = (providerRow as any)?.name ?? null;
+    }
+    const fromLabel = providerName ?? fromAddress ?? "a provider";
+    const subject = (data?.subject as string | undefined)?.trim() || "(no subject)";
+    const delivered = await sendPushToUser(profile.id, {
+      title: `${fromLabel} replied`,
+      body: subject.length > 100 ? `${subject.slice(0, 97)}…` : subject,
+      // Deep-link straight to the History tab with the relevant task expanded.
+      // The service worker reads this and navigates on click.
+      url: taskId ? `/app?tab=history&task=${taskId}` : "/app",
+      tag: taskId ? `task-${taskId}` : "reply"
+    });
+    if (delivered > 0) {
+      console.log(`[inbound] push delivered to ${delivered} device(s) for user ${profile.id}`);
+    }
+  } catch (err) {
+    console.error("[inbound] push notification failed (non-fatal)", err);
+  }
+
   return res.json({ received: true });
 });
 

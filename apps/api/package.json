@@ -29,6 +29,8 @@
     "stripe": "^15.8.0",
     "svix": "^1.42.0",
     "typescript": "^5.4.5",
+    "web-push": "^3.6.7",
+    "@types/web-push": "^3.6.4",
     "zod": "^3.23.8"
   },
   "devDependencies": {
