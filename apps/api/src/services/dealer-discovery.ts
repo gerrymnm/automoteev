@@ -177,8 +177,12 @@ export function rankByDistanceAndRating<T extends FoundProvider>(
       (userLoc ? "" : " (no userLoc — falling back to rating-only)")
   );
 
-  // Strip the internal _score field from the public shape.
-  return withScores.map(({ _score: _ignored, ...rest }) => rest);
+  // Strip the internal _score field from the public shape. Cast required
+  // because TS can't prove `Omit<T & {_score}, "_score">` equals `T & {...}`
+  // for a generic T — same strict-mode pattern as commit beb1f7e.
+  return withScores.map(({ _score: _ignored, ...rest }) => rest) as Array<
+    T & { distance_miles: number | null }
+  >;
 }
 
 /**
