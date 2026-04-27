@@ -2991,7 +2991,10 @@ function PushNotificationPanel() {
       if (!sub) {
         sub = await reg.pushManager.subscribe({
           userVisibleOnly: true,
-          applicationServerKey: urlBase64ToUint8Array(public_key)
+          // Cast: TS strict-mode narrows Uint8Array's buffer to ArrayBufferLike
+          // (could be SharedArrayBuffer), which doesn't satisfy BufferSource.
+          // The runtime value is a plain Uint8Array, which the API accepts.
+          applicationServerKey: urlBase64ToUint8Array(public_key) as BufferSource
         });
       }
 
