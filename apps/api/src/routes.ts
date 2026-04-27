@@ -36,6 +36,7 @@ import { taskEmailBody, taskEmailSubject } from "./services/emailTemplates.js";
 import { createProCheckoutSession } from "./services/stripe.js";
 import { searchProviders } from "./services/places.js";
 import { discoverProvidersForTask, isDispatchable, type DispatchableTaskType } from "./services/dealer-discovery.js";
+import { pickProviderEmailForDept, taskTypeToContactDept } from "./services/contacts.js";
 import { getGasPrice, getMaintenanceCost } from "./services/market.js";
 import { assignAgentEmailLocal, composeAgentAddress } from "./services/alias.js";
 import {
@@ -1660,6 +1661,7 @@ async function buildDispatchPayload(
 
   // Upsert each discovered provider so it has an id we can dispatch to.
   // Dedupe on (user_id, name, location) which is good enough for MVP.
+  const dept = taskTypeToContactDept(taskType);
   const inserted: any[] = [];
   for (const d of discovered) {
     const { data: existing } = await supabaseAdmin
@@ -1671,7 +1673,8 @@ async function buildDispatchPayload(
       .maybeSingle();
 
     if (existing) {
-      // Refresh email if we now have a derived one and the row didn't.
+      // Refresh published email if we now have a verified one and the row didn't.
+      // The 'contacts[dept]' learned address is preferred at send time.
       if (!existing.email && d.derived_email) {
         await supabaseAdmin
           .from("providers")
@@ -1679,9 +1682,17 @@ async function buildDispatchPayload(
           .eq("id", existing.id);
         existing.email = d.derived_email;
       }
+      // Resolved email = learned dept contact, else published email
+      const resolved = pickProviderEmailForDept(
+        existing.contacts as Record<string, string>,
+        existing.email,
+        dept
+      );
       inserted.push({
         ...existing,
-        derived_email_basis: existing.email === d.derived_email ? d.derived_email_basis : "verified",
+        // Display the address we'd actually send to in the modal
+        email: resolved,
+        derived_email_basis: resolved ? "verified" : "none",
         rating: d.rating,
         rating_count: d.rating_count,
         website: d.website
@@ -1701,8 +1712,14 @@ async function buildDispatchPayload(
         .select()
         .single();
       if (created) {
+        const resolved = pickProviderEmailForDept(
+          created.contacts as Record<string, string>,
+          created.email,
+          dept
+        );
         inserted.push({
           ...created,
+          email: resolved,
           derived_email_basis: d.derived_email_basis,
           rating: d.rating,
           rating_count: d.rating_count,
@@ -1715,10 +1732,17 @@ async function buildDispatchPayload(
   // If user has a preferred provider that's not in the discovered list, prepend it.
   let providers = inserted;
   if (existingPreferred && !providers.find((p) => p.id === (existingPreferred as any).id)) {
+    const pref = existingPreferred as any;
+    const resolved = pickProviderEmailForDept(
+      pref.contacts as Record<string, string>,
+      pref.email,
+      dept
+    );
     providers = [
       {
-        ...(existingPreferred as any),
-        derived_email_basis: "verified",
+        ...pref,
+        email: resolved,
+        derived_email_basis: resolved ? "verified" : "none",
         rating: null,
         rating_count: null,
         website: null
@@ -1829,12 +1853,26 @@ router.post("/api/tasks/:id/dispatch", async (req, res) => {
   }
 
   // Apply per-provider email overrides from the modal (user can edit a guessed email).
+  // Then resolve each provider's effective send-to address: learned dept contact > published.
+  const taskTypeForDept = (task as any).task_type as string;
+  const dispatchDept = taskTypeToContactDept(taskTypeForDept);
   for (const p of providerRows) {
     const override = overrides?.[p.id]?.email;
     if (override && override !== p.email) {
-      await req.db!.from("providers").update({ email: override }).eq("id", p.id);
-      p.email = override;
+      // Treat the manual override as a learned dept contact — saves writing the
+      // same email twice when the user fixes a wrong address in the modal.
+      const updatedContacts = {
+        ...((p.contacts ?? {}) as Record<string, string>),
+        [dispatchDept]: override
+      };
+      await req.db!.from("providers").update({ contacts: updatedContacts }).eq("id", p.id);
+      p.contacts = updatedContacts;
     }
+    p._send_to = pickProviderEmailForDept(
+      p.contacts as Record<string, string>,
+      p.email,
+      dispatchDept
+    );
   }
 
   // Mark the chosen one as preferred (and unset others for this user).
@@ -1890,13 +1928,13 @@ router.post("/api/tasks/:id/dispatch", async (req, res) => {
   const skipped: Array<{ provider_id: string; reason: string }> = [];
   const sentLogs: any[] = [];
   for (const p of providerRows) {
-    if (!p.email) {
+    if (!p._send_to) {
       skipped.push({ provider_id: p.id, reason: "no_email" });
       continue;
     }
     try {
       const result = await sendTaskEmail({
-        to: p.email,
+        to: p._send_to,
         fromLocal: (profile as any).agent_email_local,
         fromDisplayName: (profile as any).full_name,
         subject,
@@ -1908,7 +1946,7 @@ router.post("/api/tasks/:id/dispatch", async (req, res) => {
           user_id: req.user!.id,
           task_id: taskId,
           provider_id: p.id,
-          to_email: p.email,
+          to_email: p._send_to,
           from_email: result.from,
           subject,
           body_text: text,

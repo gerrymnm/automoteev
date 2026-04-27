@@ -4,6 +4,7 @@ import { Webhook } from "svix";
 import { env } from "./config.js";
 import { supabaseAdmin } from "./supabase.js";
 import { stripe, verifyStripeWebhook } from "./services/stripe.js";
+import { taskTypeToContactDept, shouldLearnContact } from "./services/contacts.js";
 
 export const webhooks = Router();
 
@@ -146,49 +147,65 @@ webhooks.post("/webhooks/email/inbound", async (req: Request, res: Response) => 
     originalToEmail = original?.to_email ?? null;
   }
 
-  // ---- Reply-learning ----------------------------------------------------
-  // If the dealer replied from a DIFFERENT email at the SAME domain as the
-  // address we wrote to, that's a strong signal the originally-published
-  // address either forwards to a real human (whose address we now know) or
-  // simply isn't watched. Either way: update the provider's email of record
-  // so future outreach goes straight to the human who actually replies.
+  // ---- Reply-learning (PER DEPARTMENT) -----------------------------------
+  // A dealership has multiple humans in multiple inboxes — service writer,
+  // sales rep, F&I, parts. We never overwrite one with the other. Instead,
+  // we look up which DEPARTMENT this reply is for (based on the originating
+  // task's task_type), and write only to provider.contacts[dept].
   //
-  // Hard rules:
-  //   - Only learn within the same domain. We never silently switch to a
-  //     different domain (that could be a spam reply or an unrelated person).
-  //   - Never overwrite with a no-reply / do-not-reply address.
-  //   - Skip if the original and reply addresses match (no learning needed).
-  if (providerId && fromAddress && originalToEmail) {
-    const newAddr = fromAddress.toLowerCase().trim();
-    const oldAddr = originalToEmail.toLowerCase().trim();
-    const newDomain = newAddr.split("@")[1] ?? "";
-    const oldDomain = oldAddr.split("@")[1] ?? "";
-    const isNoReply = /^(no.?reply|do.?not.?reply|noreply)@/.test(newAddr);
-    if (
-      newAddr !== oldAddr &&
-      newDomain &&
-      oldDomain &&
-      newDomain === oldDomain &&
-      !isNoReply
-    ) {
-      try {
-        await supabaseAdmin
+  // The published address (providers.email) is left untouched — it remains
+  // the fallback for new task types we haven't yet learned a contact for.
+  if (providerId && fromAddress && originalToEmail && taskId) {
+    try {
+      const [{ data: taskRow }, { data: providerRow }] = await Promise.all([
+        supabaseAdmin
+          .from("vehicle_tasks")
+          .select("task_type")
+          .eq("id", taskId)
+          .maybeSingle(),
+        supabaseAdmin
           .from("providers")
-          .update({ email: newAddr })
-          .eq("id", providerId);
-        await supabaseAdmin.from("task_audit_logs").insert({
-          user_id: profile.id,
-          task_id: taskId,
-          event_type: "provider_email_learned",
-          summary: `Updated provider contact email from ${oldAddr} to ${newAddr} (replied from same domain)`,
-          metadata: { provider_id: providerId, from: oldAddr, to: newAddr }
+          .select("contacts, email")
+          .eq("id", providerId)
+          .maybeSingle()
+      ]);
+
+      if (taskRow && providerRow) {
+        const dept = taskTypeToContactDept((taskRow as any).task_type);
+        const existingContacts = ((providerRow as any).contacts ?? {}) as Record<string, string>;
+        const newAddr = shouldLearnContact({
+          replyFrom: fromAddress,
+          outboundTo: originalToEmail,
+          existingForDept: existingContacts[dept]
         });
-        console.log(
-          `[inbound] learned new email for provider ${providerId}: ${oldAddr} → ${newAddr}`
-        );
-      } catch (err) {
-        console.error("[inbound] failed to learn provider email", err);
+
+        if (newAddr) {
+          const updatedContacts = { ...existingContacts, [dept]: newAddr };
+          await supabaseAdmin
+            .from("providers")
+            .update({ contacts: updatedContacts })
+            .eq("id", providerId);
+
+          await supabaseAdmin.from("task_audit_logs").insert({
+            user_id: profile.id,
+            task_id: taskId,
+            event_type: "provider_contact_learned",
+            summary: `Learned ${dept} contact: ${newAddr} (replied from same domain as ${originalToEmail})`,
+            metadata: {
+              provider_id: providerId,
+              dept,
+              from: originalToEmail,
+              to: newAddr,
+              previous: existingContacts[dept] ?? null
+            }
+          });
+          console.log(
+            `[inbound] learned ${dept} contact for provider ${providerId}: ${originalToEmail} → ${newAddr}`
+          );
+        }
       }
+    } catch (err) {
+      console.error("[inbound] failed to learn provider contact (non-fatal)", err);
     }
   }
   // ------------------------------------------------------------------------
