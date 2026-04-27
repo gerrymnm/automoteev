@@ -1884,11 +1884,16 @@ function Command({ vehicleId, onCreated }: { vehicleId: string; onCreated: () =>
 }
 
 // ============================================================
-// HISTORY TAB
+// HISTORY TAB — expandable activity log per task.
+// Each task (active + closed) is expandable to show its full email thread
+// and audit trail. Backed by /api/tasks/:id/history which returns
+// { emails, audit_logs }. Closed tasks grouped by status; active tasks at top.
 // ============================================================
 function History({ tasks }: { tasks: Task[] }) {
+  const active = tasks.filter((t) => !(["completed", "failed", "cancelled"].includes(t.status)));
   const closed = tasks.filter((t) => ["completed", "failed", "cancelled"].includes(t.status));
   const grouped = {
+    active,
     completed: closed.filter((t) => t.status === "completed"),
     cancelled: closed.filter((t) => t.status === "cancelled"),
     failed: closed.filter((t) => t.status === "failed")
@@ -1897,14 +1902,19 @@ function History({ tasks }: { tasks: Task[] }) {
   return (
     <section className="history-page">
       <div className="panel">
-        <h2>Task history</h2>
-        {closed.length === 0 ? (
+        <h2>Activity log</h2>
+        <p className="muted small">
+          Every Automoteev action is logged here. Tap any task to see the email
+          thread, who replied, and what the agent learned.
+        </p>
+        {tasks.length === 0 ? (
           <p className="muted">Nothing here yet. Approved and finished tasks will show up here.</p>
         ) : (
           <>
-            <HistoryGroup title="Completed" tasks={grouped.completed} />
-            <HistoryGroup title="Cancelled" tasks={grouped.cancelled} />
-            <HistoryGroup title="Did not complete" tasks={grouped.failed} subtle />
+            <HistoryGroup title="In progress" tasks={grouped.active} expandable />
+            <HistoryGroup title="Completed" tasks={grouped.completed} expandable />
+            <HistoryGroup title="Cancelled" tasks={grouped.cancelled} expandable />
+            <HistoryGroup title="Did not complete" tasks={grouped.failed} subtle expandable />
           </>
         )}
       </div>
@@ -1912,21 +1922,208 @@ function History({ tasks }: { tasks: Task[] }) {
   );
 }
 
-function HistoryGroup({ title, tasks, subtle }: { title: string; tasks: Task[]; subtle?: boolean }) {
+interface TaskHistoryEmail {
+  id: string;
+  direction: "outbound" | "inbound";
+  to_email: string;
+  from_email: string;
+  subject: string;
+  body_text: string;
+  status: string;
+  created_at: string;
+}
+
+interface TaskHistoryAuditLog {
+  id: string;
+  event_type: string;
+  summary: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+interface TaskHistoryResponse {
+  emails: TaskHistoryEmail[];
+  audit_logs: TaskHistoryAuditLog[];
+}
+
+function HistoryGroup({
+  title,
+  tasks,
+  subtle,
+  expandable
+}: {
+  title: string;
+  tasks: Task[];
+  subtle?: boolean;
+  expandable?: boolean;
+}) {
   if (!tasks.length) return null;
   return (
     <div className={`history-group ${subtle ? "subtle" : ""}`}>
-      <h3>{title}</h3>
-      <ul className="history-list">
-        {tasks.map((t) => (
-          <li key={t.id}>
-            <span className="history-title">{t.title}</span>
-            <span className="muted small">{new Date(t.created_at).toLocaleDateString()}</span>
-          </li>
-        ))}
-      </ul>
+      <h3>{title} <span className="muted small" style={{ fontWeight: 400, textTransform: "none" }}>({tasks.length})</span></h3>
+      <div className="history-list">
+        {tasks.map((t) =>
+          expandable ? <HistoryTaskRow key={t.id} task={t} /> : (
+            <div className="history-row" key={t.id}>
+              <span className="history-title">{t.title}</span>
+              <span className="muted small">{new Date(t.created_at).toLocaleDateString()}</span>
+            </div>
+          )
+        )}
+      </div>
     </div>
   );
+}
+
+function HistoryTaskRow({ task }: { task: Task }) {
+  const [open, setOpen] = useState(false);
+  const [history, setHistory] = useState<TaskHistoryResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function toggle() {
+    const next = !open;
+    setOpen(next);
+    if (next && !history && !loading) {
+      setLoading(true);
+      setError(null);
+      try {
+        const data = await api<TaskHistoryResponse>(`/api/tasks/${task.id}/history`);
+        setHistory(data);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Could not load history");
+      } finally {
+        setLoading(false);
+      }
+    }
+  }
+
+  return (
+    <div className="history-task">
+      <button className="history-task-head" type="button" onClick={toggle}>
+        <ChevronRight
+          size={16}
+          className="history-task-chev"
+          style={{ transform: open ? "rotate(90deg)" : "none" }}
+        />
+        <div className="history-task-head-text">
+          <span className="history-title">{task.title}</span>
+          <span className="muted small">
+            {new Date(task.created_at).toLocaleDateString()} · {task.status.replaceAll("_", " ")}
+          </span>
+        </div>
+        <span className={`status-chip status-${task.status}`}>
+          {task.status.replaceAll("_", " ")}
+        </span>
+      </button>
+      {open && (
+        <div className="history-task-body">
+          {loading && <div className="thin-status"><Loader2 size={14} className="spinner" /> Loading activity…</div>}
+          {error && <div className="error">{error}</div>}
+          {history && <TaskActivityTimeline history={history} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Interleave audit events and emails into a single chronological timeline.
+function TaskActivityTimeline({ history }: { history: TaskHistoryResponse }) {
+  type TimelineItem =
+    | { kind: "email"; at: string; data: TaskHistoryEmail }
+    | { kind: "audit"; at: string; data: TaskHistoryAuditLog };
+
+  const items: TimelineItem[] = [
+    ...history.emails.map((e) => ({ kind: "email" as const, at: e.created_at, data: e })),
+    ...history.audit_logs.map((a) => ({ kind: "audit" as const, at: a.created_at, data: a }))
+  ].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
+
+  if (items.length === 0) {
+    return <p className="muted small">No activity recorded yet for this task.</p>;
+  }
+
+  return (
+    <ul className="activity-timeline">
+      {items.map((item, idx) =>
+        item.kind === "email" ? (
+          <ActivityEmail key={`e-${item.data.id}-${idx}`} email={item.data} />
+        ) : (
+          <ActivityAudit key={`a-${item.data.id}-${idx}`} log={item.data} />
+        )
+      )}
+    </ul>
+  );
+}
+
+function ActivityEmail({ email }: { email: TaskHistoryEmail }) {
+  const [open, setOpen] = useState(false);
+  const isOutbound = email.direction === "outbound";
+  return (
+    <li className={`activity-item activity-email ${isOutbound ? "outbound" : "inbound"}`}>
+      <div className="activity-icon">
+        {isOutbound ? <Send size={14} /> : <Mail size={14} />}
+      </div>
+      <div className="activity-body">
+        <div className="activity-line">
+          <strong>
+            {isOutbound ? `Sent to ${email.to_email}` : `Reply from ${email.from_email}`}
+          </strong>
+          <span className="muted small">{new Date(email.created_at).toLocaleString()}</span>
+        </div>
+        <div className="activity-subject small">{email.subject}</div>
+        <button className="ghost small inline-edit" type="button" onClick={() => setOpen((v) => !v)}>
+          {open ? "Hide message" : "Show message"}
+        </button>
+        {open && <pre className="activity-email-body">{email.body_text}</pre>}
+      </div>
+    </li>
+  );
+}
+
+function ActivityAudit({ log }: { log: TaskHistoryAuditLog }) {
+  const icon = iconForAuditEvent(log.event_type);
+  return (
+    <li className="activity-item activity-audit">
+      <div className="activity-icon">{icon}</div>
+      <div className="activity-body">
+        <div className="activity-line">
+          <strong>{humanizeEventType(log.event_type)}</strong>
+          <span className="muted small">{new Date(log.created_at).toLocaleString()}</span>
+        </div>
+        <div className="small">{log.summary}</div>
+      </div>
+    </li>
+  );
+}
+
+function iconForAuditEvent(eventType: string) {
+  switch (eventType) {
+    case "task_dispatched":
+      return <Send size={14} />;
+    case "task_approved":
+      return <CheckCircle2 size={14} />;
+    case "task_cancelled":
+      return <X size={14} />;
+    case "provider_contact_learned":
+    case "provider_email_learned":
+      return <Sparkles size={14} />;
+    case "recall_checked":
+      return <AlertTriangle size={14} />;
+    case "insight_acted":
+      return <ChevronRight size={14} />;
+    case "document_uploaded":
+    case "document_applied":
+      return <FileImage size={14} />;
+    default:
+      return <Info size={14} />;
+  }
+}
+
+function humanizeEventType(eventType: string): string {
+  return eventType
+    .split("_")
+    .map((w) => w[0]?.toUpperCase() + w.slice(1))
+    .join(" ");
 }
 
 // ============================================================

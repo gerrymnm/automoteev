@@ -414,7 +414,11 @@ router.get("/api/vehicles/:id/dashboard", async (req, res) => {
       .db!.from("vehicle_tasks")
       .select("task_type")
       .eq("vehicle_id", vehicleId)
-      .in("status", ["needs_user_approval", "approved", "in_progress", "waiting_on_provider"])
+      // Only suppress recommendations once the agent has actually acted.
+      // needs_user_approval / approved tasks should still surface so the
+      // user can re-engage with one tap (idempotent dispatch flow handles
+      // re-engagement on the backend).
+      .in("status", ["in_progress", "waiting_on_provider"])
   ]);
 
   // Generate insights inline so the user always sees the freshest list.
@@ -1329,7 +1333,9 @@ router.post("/api/insights/act", async (req, res) => {
         .db!.from("vehicle_tasks")
         .select("task_type")
         .eq("vehicle_id", vehicle_id)
-        .in("status", ["needs_user_approval", "approved", "in_progress", "waiting_on_provider"])
+        // Only suppress when the agent has acted — needs_user_approval / approved
+        // tasks should keep their recommendation visible so the user can re-engage.
+        .in("status", ["in_progress", "waiting_on_provider"])
     ]);
 
   const lastShoppedAt = (insurance as any)?.last_shopped_at;

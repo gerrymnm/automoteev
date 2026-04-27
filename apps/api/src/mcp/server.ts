@@ -304,7 +304,9 @@ async function buildDashboardData(userId: string, vehicleId: string) {
       .from("vehicle_tasks")
       .select("task_type")
       .eq("vehicle_id", vehicleId)
-      .in("status", ["needs_user_approval", "approved", "in_progress", "waiting_on_provider"])
+      // Only suppress recommendations once the agent has acted; needs_user_approval
+      // and approved tasks should stay visible so the user can re-engage with one tap.
+      .in("status", ["in_progress", "waiting_on_provider"])
   ]);
 
   const lastShoppedAt = (insurance.data as any)?.last_shopped_at;
