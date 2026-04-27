@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, createContext, useContext } from "react";
 import type { Session } from "@supabase/supabase-js";
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation, Link } from "react-router-dom";
 import {
   AlertTriangle,
   Camera,
@@ -59,7 +60,19 @@ function isDispatchableTaskType(t: string | null | undefined): boolean {
 type Tab = "status" | "tasks" | "command" | "history" | "settings";
 type FormId = "insurance" | "loan" | "fuel" | "preferred_shop";
 
-export function App() {
+// ============================================================
+// Session context
+// ============================================================
+interface SessionContextValue {
+  session: Session | null;
+  loading: boolean;
+}
+const SessionContext = createContext<SessionContextValue>({ session: null, loading: true });
+export function useSession() {
+  return useContext(SessionContext);
+}
+
+function SessionProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -72,10 +85,57 @@ export function App() {
     return () => data.subscription.unsubscribe();
   }, []);
 
+  return (
+    <SessionContext.Provider value={{ session, loading }}>
+      {children}
+    </SessionContext.Provider>
+  );
+}
+
+// Wraps a route that requires a signed-in user. Redirects to /signin if not.
+function RequireAuth({ children }: { children: React.ReactNode }) {
+  const { session, loading } = useSession();
+  const location = useLocation();
   if (loading) return <Shell><div className="panel">Loading secure session…</div></Shell>;
-  if (!isSupabaseConfigured) return <Shell><SetupNotice /></Shell>;
-  if (!session) return <Shell><AuthPanel /></Shell>;
-  return <Product session={session} />;
+  if (!session) return <Navigate to="/signin" replace state={{ from: location.pathname }} />;
+  return <>{children}</>;
+}
+
+// Wraps a route (like /signin) that should redirect a signed-in user away.
+function RedirectIfAuth({ children }: { children: React.ReactNode }) {
+  const { session, loading } = useSession();
+  if (loading) return <Shell><div className="panel">Loading…</div></Shell>;
+  if (session) return <Navigate to="/app" replace />;
+  return <>{children}</>;
+}
+
+// ============================================================
+// Top-level App = router host
+// ============================================================
+export function App() {
+  // Imported lazily so adding the router doesn't require touching every page file.
+  return (
+    <BrowserRouter>
+      <SessionProvider>
+        {!isSupabaseConfigured ? (
+          <Shell><SetupNotice /></Shell>
+        ) : (
+          <Routes>
+            {/* Public marketing + auth */}
+            <Route path="/" element={<RedirectIfAuth><LandingPage /></RedirectIfAuth>} />
+            <Route path="/signin" element={<RedirectIfAuth><SignInPage /></RedirectIfAuth>} />
+            <Route path="/signup" element={<RedirectIfAuth><SignUpPage /></RedirectIfAuth>} />
+            <Route path="/privacy" element={<PrivacyPage />} />
+            <Route path="/terms" element={<TermsPage />} />
+            {/* Authenticated app */}
+            <Route path="/app/*" element={<RequireAuth><AuthenticatedApp /></RequireAuth>} />
+            {/* Fallback */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        )}
+      </SessionProvider>
+    </BrowserRouter>
+  );
 }
 
 // ============================================================
@@ -96,12 +156,22 @@ function SetupNotice() {
 }
 
 function AuthPanel() {
+  // Legacy combined sign-in/sign-up panel — retained as the inner shared form.
+  return <SignInForm />;
+}
+
+/**
+ * Auth form, used by both /signin and /signup pages.
+ * `mode` controls which side of the toggle starts active.
+ */
+function AuthForm({ mode: initialMode }: { mode: "signin" | "signup" }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const [mode, setMode] = useState<"signin" | "signup">(initialMode);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const navigate = useNavigate();
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -116,7 +186,7 @@ function AuthPanel() {
         const result = await supabase.auth.signUp({
           email,
           password,
-          options: { emailRedirectTo: window.location.origin }
+          options: { emailRedirectTo: `${window.location.origin}/app` }
         });
         if (result.error) setError(result.error.message);
         else if (!result.data.session)
@@ -130,39 +200,427 @@ function AuthPanel() {
   }
 
   return (
-    <section className="auth-grid">
-      <div className="intro">
-        <div className="brand">Automoteev</div>
-        <h1>Save money on your monthly expenses. Without lifting a finger.</h1>
-        <p className="hero-sub-tagline">
-          Starting with your car. Insurance, subscriptions, and recurring bills next.
-        </p>
-        <p>
-          Automoteev is the AI agent that watches your insurance, loan, and service costs,
-          finds savings, requests quotes from real providers, and acts on your behalf. You
-          only see the wins worth taking.
-        </p>
-        <div className="trust-row"><ShieldCheck size={18} /> Nothing gets sent to a provider without your approval.</div>
-      </div>
-      <form className="panel auth-card" onSubmit={submit}>
-        <h2>{mode === "signin" ? "Sign in" : "Create account"}</h2>
-        <label>Email<input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required /></label>
-        <label>Password<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" minLength={8} required /></label>
-        {error && <div className="error">{error}</div>}
-        {info && <div className="notice">{info}</div>}
-        <button className="primary" type="submit" disabled={busy}>
-          {busy ? "Working…" : mode === "signin" ? "Sign in" : "Sign up"}
-        </button>
-        <button
-          className="ghost"
-          type="button"
-          onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setError(null); setInfo(null); }}
-        >
-          {mode === "signin" ? "Create an account" : "Already have an account"}
-        </button>
-      </form>
-    </section>
+    <form className="panel auth-card" onSubmit={submit}>
+      <h2>{mode === "signin" ? "Sign in" : "Create account"}</h2>
+      <label>Email<input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required /></label>
+      <label>Password<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" minLength={8} required /></label>
+      {error && <div className="error">{error}</div>}
+      {info && <div className="notice">{info}</div>}
+      <button className="primary" type="submit" disabled={busy}>
+        {busy ? "Working…" : mode === "signin" ? "Sign in" : "Sign up"}
+      </button>
+      <button
+        className="ghost"
+        type="button"
+        onClick={() => {
+          const next = mode === "signin" ? "signup" : "signin";
+          setMode(next);
+          setError(null);
+          setInfo(null);
+          navigate(`/${next}`, { replace: true });
+        }}
+      >
+        {mode === "signin" ? "Create an account" : "Already have an account"}
+      </button>
+    </form>
   );
+}
+
+function SignInForm() { return <AuthForm mode="signin" />; }
+function SignUpForm() { return <AuthForm mode="signup" />; }
+
+// ============================================================
+// Public marketing pages
+// ============================================================
+
+// Top nav for public marketing pages — brand on the left, sign-in/up on the right.
+function PublicNav() {
+  return (
+    <header className="public-nav">
+      <Link className="public-brand" to="/">
+        <span className="brand">Automoteev</span>
+      </Link>
+      <div className="public-nav-actions">
+        <Link to="/signin" className="ghost">Sign in</Link>
+        <Link to="/signup" className="primary public-cta">Get started — free</Link>
+      </div>
+    </header>
+  );
+}
+
+function PublicFooter() {
+  return (
+    <footer className="public-footer">
+      <div className="footer-inner">
+        <div className="footer-brand">
+          <strong>Automoteev</strong>
+          <p className="small muted">Your AI agent for life's recurring expenses.</p>
+          <p className="small muted">Carculus Automotive LLC</p>
+        </div>
+        <div className="footer-links">
+          <Link to="/privacy" className="small">Privacy</Link>
+          <Link to="/terms" className="small">Terms</Link>
+          <a href="mailto:gerry@carculus.ai" className="small">Contact</a>
+        </div>
+      </div>
+    </footer>
+  );
+}
+
+function LandingPage() {
+  return (
+    <div className="public-page">
+      <PublicNav />
+      <main className="landing-main">
+        {/* HERO */}
+        <section className="landing-hero">
+          <div className="landing-hero-text">
+            <h1>Save money on your monthly expenses. Without lifting a finger.</h1>
+            <p className="landing-hero-sub">
+              Starting with your car. Insurance, subscriptions, and recurring bills next.
+            </p>
+            <p className="landing-hero-body">
+              Automoteev is the AI agent that watches your insurance, loan, and service costs,
+              finds savings, requests quotes from real providers, and acts on your behalf. You
+              only see the wins worth taking.
+            </p>
+            <div className="landing-cta-row">
+              <Link to="/signup" className="primary big-cta">Get started — free</Link>
+              <Link to="/signin" className="ghost big-cta-ghost">Sign in</Link>
+            </div>
+            <div className="trust-row">
+              <ShieldCheck size={16} /> Nothing gets sent to a provider without your approval.
+            </div>
+          </div>
+          <div className="landing-hero-visual" aria-hidden>
+            <ProductPreviewCard />
+          </div>
+        </section>
+
+        {/* HOW IT WORKS */}
+        <section className="landing-section">
+          <h2 className="landing-section-title">How it works</h2>
+          <p className="landing-section-sub">Three simple steps. No spreadsheets, no phone trees.</p>
+          <div className="how-grid">
+            <div className="how-card">
+              <div className="how-step">1</div>
+              <h3>Add your vehicle</h3>
+              <p>VIN and mileage are enough. Snap a photo of your insurance dec page or loan statement and Automoteev fills in the rest.</p>
+            </div>
+            <div className="how-card">
+              <div className="how-step">2</div>
+              <h3>Automoteev finds savings</h3>
+              <p>Open recalls, refinance opportunities, insurance shopping windows, lease-end timing, dealer offers — prioritized by what's worth your attention.</p>
+            </div>
+            <div className="how-card">
+              <div className="how-step">3</div>
+              <h3>Approve, the agent acts</h3>
+              <p>One tap to dispatch. Automoteev contacts real providers from your dedicated agent email, learns who replies, and routes the conversation back to you.</p>
+            </div>
+          </div>
+        </section>
+
+        {/* WHAT'S COVERED */}
+        <section className="landing-section landing-section-alt">
+          <h2 className="landing-section-title">What Automoteev handles</h2>
+          <p className="landing-section-sub">Vehicle today. Everything recurring next.</p>
+          <div className="covered-grid">
+            <div className="covered-card now">
+              <span className="covered-pill">Available now</span>
+              <h3><Wrench size={18} /> Vehicle</h3>
+              <ul>
+                <li>Open recall lookup + dealer outreach</li>
+                <li>Insurance shopping</li>
+                <li>Refinance &amp; payoff requests</li>
+                <li>Service quotes from real shops</li>
+                <li>Sale &amp; lease-end coordination</li>
+              </ul>
+            </div>
+            <div className="covered-card next">
+              <span className="covered-pill upcoming">Coming soon</span>
+              <h3><ShieldCheck size={18} /> Home, life &amp; renters insurance</h3>
+              <p>Same shop-and-save loop, applied to every policy you carry.</p>
+            </div>
+            <div className="covered-card next">
+              <span className="covered-pill upcoming">Coming soon</span>
+              <h3><DollarSign size={18} /> Subscription audits</h3>
+              <p>Catches the streaming, software, and gym charges you forgot you signed up for.</p>
+            </div>
+            <div className="covered-card next">
+              <span className="covered-pill upcoming">Coming soon</span>
+              <h3><TrendingUp size={18} /> Recurring bill optimization</h3>
+              <p>Internet, mobile, energy — negotiate or switch when better deals appear.</p>
+            </div>
+          </div>
+        </section>
+
+        {/* PRICING */}
+        <section className="landing-section">
+          <h2 className="landing-section-title">Pricing</h2>
+          <p className="landing-section-sub">Free to start. Upgrade only when the agent works for you.</p>
+          <div className="pricing-grid">
+            <div className="pricing-card">
+              <h3>Free</h3>
+              <p className="pricing-amount">$0</p>
+              <ul>
+                <li>Vehicle dashboard &amp; valuation</li>
+                <li>Recall lookup</li>
+                <li>Savings recommendations</li>
+                <li>Fuel log</li>
+              </ul>
+              <Link to="/signup" className="secondary pricing-cta">Get started</Link>
+            </div>
+            <div className="pricing-card pricing-card-pro">
+              <span className="pricing-badge">Most popular</span>
+              <h3>Pro</h3>
+              <p className="pricing-amount">$9.99<span className="pricing-period">/mo</span></p>
+              <p className="small muted">or $99/yr (save ~17%)</p>
+              <ul>
+                <li>Everything in Free</li>
+                <li>Autonomous agent outreach to providers</li>
+                <li>Document upload + AI auto-fill</li>
+                <li>Multi-vehicle support</li>
+                <li>OBD dongle reservation</li>
+                <li>SMS channel (coming soon)</li>
+              </ul>
+              <Link to="/signup" className="primary pricing-cta">Start free, upgrade anytime</Link>
+            </div>
+          </div>
+        </section>
+
+        {/* TRUST */}
+        <section className="landing-section landing-section-alt">
+          <h2 className="landing-section-title">Built for trust</h2>
+          <div className="trust-grid">
+            <div className="trust-card">
+              <ShieldCheck size={22} />
+              <h3>You approve every action</h3>
+              <p>Automoteev never contacts a provider without your explicit approval, especially in the first few interactions. Autonomy unlocks gradually as you build trust with the agent.</p>
+            </div>
+            <div className="trust-card">
+              <Lock size={22} />
+              <h3>Phone numbers stay private</h3>
+              <p>Outbound emails go from your dedicated Automoteev alias. Your phone number is never disclosed in agent communication.</p>
+            </div>
+            <div className="trust-card">
+              <Info size={22} />
+              <h3>Every action is logged</h3>
+              <p>The agent's full activity trail — every email sent, every reply received, every contact learned — is reviewable in your account.</p>
+            </div>
+          </div>
+        </section>
+
+        {/* FINAL CTA */}
+        <section className="landing-final-cta">
+          <h2>Ready to stop overpaying?</h2>
+          <p className="landing-section-sub">Sign up in under a minute. VIN and mileage to start.</p>
+          <Link to="/signup" className="primary big-cta">Get started — free</Link>
+        </section>
+      </main>
+      <PublicFooter />
+    </div>
+  );
+}
+
+// Stylized faux product card. Stays in sync with brand without needing a real screenshot.
+function ProductPreviewCard() {
+  return (
+    <div className="preview-card">
+      <div className="preview-head">
+        <div className="preview-pill">Action recommended</div>
+      </div>
+      <h3 className="preview-vehicle">2020 Land Rover Range Rover</h3>
+      <p className="preview-vin small muted">VIN SALGR2SU5LA584256 · 47,000 mi</p>
+      <div className="preview-savings">
+        <TrendingUp size={18} />
+        <strong>~$4,962/yr in potential savings</strong>
+      </div>
+      <div className="preview-priority">
+        <div className="preview-priority-row preview-urgent">
+          <AlertTriangle size={14} />
+          <span><strong>4 open recalls</strong> · Approve &amp; contact dealers</span>
+        </div>
+        <div className="preview-priority-row preview-rec">
+          <DollarSign size={14} />
+          <span><strong>Refinancing could save ~$4,662/yr</strong></span>
+        </div>
+        <div className="preview-priority-row preview-rec">
+          <DollarSign size={14} />
+          <span><strong>Insurance shopping: ~$300/yr</strong></span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SignInPage() {
+  return (
+    <div className="public-page">
+      <PublicNav />
+      <main className="auth-page-main">
+        <div className="auth-page-grid">
+          <div className="auth-page-intro">
+            <h1>Welcome back</h1>
+            <p className="muted">
+              Sign in to your Automoteev account to see what the agent has been working on.
+            </p>
+          </div>
+          <SignInForm />
+        </div>
+      </main>
+      <PublicFooter />
+    </div>
+  );
+}
+
+function SignUpPage() {
+  return (
+    <div className="public-page">
+      <PublicNav />
+      <main className="auth-page-main">
+        <div className="auth-page-grid">
+          <div className="auth-page-intro">
+            <h1>Get started</h1>
+            <p className="muted">
+              Free to sign up. We just need an email and password to get going — you'll add
+              your vehicle on the next step.
+            </p>
+            <div className="trust-row small">
+              <ShieldCheck size={14} /> Nothing gets sent to a provider without your approval.
+            </div>
+          </div>
+          <SignUpForm />
+        </div>
+      </main>
+      <PublicFooter />
+    </div>
+  );
+}
+
+function PrivacyPage() {
+  return (
+    <div className="public-page">
+      <PublicNav />
+      <main className="legal-main">
+        <div className="legal-content">
+          <h1>Privacy Policy</h1>
+          <p className="muted small">Last updated: April 2026</p>
+          <p>
+            Automoteev ("we", "us") is operated by Carculus Automotive LLC. This policy
+            describes what information we collect, how we use it, and the choices you have.
+          </p>
+
+          <h2>What we collect</h2>
+          <ul>
+            <li><strong>Account info:</strong> name, email, ZIP code, optional phone.</li>
+            <li><strong>Vehicle info:</strong> VIN, mileage, ownership type, insurance carrier, loan/lease terms, recall status.</li>
+            <li><strong>Documents you upload:</strong> insurance dec pages, loan statements. Used only to extract structured fields you can apply to your profile.</li>
+            <li><strong>Activity:</strong> tasks you create, providers you approve, emails the agent sends and receives on your behalf.</li>
+          </ul>
+
+          <h2>What we don't sell</h2>
+          <p>
+            We do not sell your personal information. We do not provide your data to third
+            parties for their own marketing. The only third parties that receive any of your
+            information are the providers you explicitly approve the agent to contact — and
+            only the fields you authorize for that interaction.
+          </p>
+
+          <h2>How the agent communicates</h2>
+          <p>
+            Outbound emails are sent from a dedicated Automoteev alias on your behalf. Provider
+            replies route back into your Automoteev account, not directly to your personal
+            inbox. Your phone number is never disclosed in outbound agent communication.
+          </p>
+
+          <h2>Your choices</h2>
+          <ul>
+            <li>You can delete your account at any time by emailing gerry@carculus.ai.</li>
+            <li>You can revoke autonomy and require manual approval for every outbound action.</li>
+            <li>You can request a copy of your data.</li>
+          </ul>
+
+          <h2>Contact</h2>
+          <p>
+            Questions? Email <a href="mailto:gerry@carculus.ai">gerry@carculus.ai</a>.
+          </p>
+        </div>
+      </main>
+      <PublicFooter />
+    </div>
+  );
+}
+
+function TermsPage() {
+  return (
+    <div className="public-page">
+      <PublicNav />
+      <main className="legal-main">
+        <div className="legal-content">
+          <h1>Terms of Service</h1>
+          <p className="muted small">Last updated: April 2026</p>
+          <p>
+            By using Automoteev (operated by Carculus Automotive LLC), you agree to these
+            terms. Read them carefully before creating an account.
+          </p>
+
+          <h2>What Automoteev does</h2>
+          <p>
+            Automoteev is an AI agent that helps you manage recurring expenses on your
+            vehicle and other financial commitments. The agent surfaces recommendations,
+            drafts communication with third-party providers, and (with your approval)
+            sends emails on your behalf.
+          </p>
+
+          <h2>Your authorization</h2>
+          <p>
+            You authorize Automoteev to contact providers using your dedicated agent email
+            alias, only after you explicitly approve each action (or category of actions, in
+            higher autonomy levels). You can revoke this authorization at any time from your
+            account settings.
+          </p>
+
+          <h2>What Automoteev is not</h2>
+          <ul>
+            <li>Automoteev is not a licensed insurance agent or producer. We facilitate quote requests on your behalf but do not bind coverage.</li>
+            <li>Automoteev is not a financial advisor or lender. Refinance and payoff information is provided for your reference; final terms come from the lender.</li>
+            <li>Automoteev is not a tax advisor.</li>
+          </ul>
+
+          <h2>Pro subscription</h2>
+          <p>
+            Pro features (autonomous agent outreach, document upload, multi-vehicle, etc.)
+            are billed at $9.99/month or $99/year via Stripe. You can cancel any time; access
+            continues through the end of the current billing period.
+          </p>
+
+          <h2>Limitation of liability</h2>
+          <p>
+            Automoteev provides recommendations and facilitates communication. You are
+            responsible for the final decisions on services, financial products, and any
+            agreements you enter with third-party providers. Carculus Automotive LLC's
+            liability is limited to the amount you have paid for the service in the prior
+            twelve months.
+          </p>
+
+          <h2>Contact</h2>
+          <p>
+            Questions? Email <a href="mailto:gerry@carculus.ai">gerry@carculus.ai</a>.
+          </p>
+        </div>
+      </main>
+      <PublicFooter />
+    </div>
+  );
+}
+
+// ============================================================
+// AuthenticatedApp — the signed-in product surface (formerly Product)
+// ============================================================
+function AuthenticatedApp() {
+  const { session } = useSession();
+  if (!session) return null; // RequireAuth guards this; defensive null.
+  return <Product session={session} />;
 }
 
 // ============================================================
