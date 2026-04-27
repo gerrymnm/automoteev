@@ -430,7 +430,7 @@ function ProductPreviewCard() {
         <div className="preview-pill">Action recommended</div>
       </div>
       <h3 className="preview-vehicle">2020 Land Rover Range Rover</h3>
-      <p className="preview-vin small muted">VIN SALGR2SU5LA584256 · 47,000 mi</p>
+      <p className="preview-vin small muted">VIN xxxx...LA584256 · 47,000 mi</p>
       <div className="preview-savings">
         <TrendingUp size={18} />
         <strong>~$4,962/yr in potential savings</strong>
