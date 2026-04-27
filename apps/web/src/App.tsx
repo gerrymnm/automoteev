@@ -1333,13 +1333,24 @@ function PriorityRecallCard({
             <p className="small recall-inflight-note">
               <Send size={12} /> Outreach sent — waiting for the dealer to reply.{" "}
               {activeTask && (
-                <button
-                  className="ghost small inline-edit"
-                  type="button"
-                  onClick={() => onViewSentEmail(activeTask.id)}
-                >
-                  see what was sent
-                </button>
+                <>
+                  <button
+                    className="ghost small inline-edit"
+                    type="button"
+                    onClick={() => onViewSentEmail(activeTask.id)}
+                  >
+                    see what was sent
+                  </button>
+                  {" · "}
+                  <button
+                    className="ghost small inline-edit"
+                    type="button"
+                    onClick={() => onOpenDispatch(activeTask.id)}
+                    disabled={busy}
+                  >
+                    contact more dealers
+                  </button>
+                </>
               )}
             </p>
           ) : (
@@ -2029,6 +2040,24 @@ function TaskCenter({
                     </button>
                   </div>
                 )}
+
+                {/* waiting_on_provider: outreach already went out. Let the user
+                    contact additional providers without being stranded. */}
+                {task.status === "waiting_on_provider" && dispatchable && (
+                  <div className="button-row">
+                    <button
+                      className="secondary"
+                      onClick={() => onOpenDispatch(task.id)}
+                      disabled={opening}
+                    >
+                      {opening ? (
+                        <><Loader2 size={16} className="spinner" /> Finding more…</>
+                      ) : (
+                        <><Send size={16} /> Contact more dealers</>
+                      )}
+                    </button>
+                  </div>
+                )}
               </article>
             );
           })
@@ -2525,12 +2554,13 @@ function DLPromptModal({
 
         <p className="small">
           Insurance carriers can't generate a real quote without your driver's
-          license. We encrypt this on the server and only share it with carriers
-          you explicitly approve.
+          license. We store this encrypted on the server and only share it with
+          carriers you explicitly approve when they request it for a quote.
         </p>
 
         <div className="trust-row small dl-trust-row">
-          <Lock size={14} /> Encrypted at rest. Never displayed in outbound email.
+          <Lock size={14} /> Encrypted at rest. Only sent to a specific carrier
+          after you approve that carrier.
         </div>
 
         <div className="form-grid">

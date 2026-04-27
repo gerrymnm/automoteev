@@ -1724,6 +1724,45 @@ router.post("/api/push/test", async (req, res) => {
 // ---------- Dispatch (send approved task to many providers in one go) ----------
 
 /**
+ * Returns true if the user's saved preferred provider can handle this task.
+ * Refinance tasks shouldn't auto-include a service dealership; insurance
+ * tasks shouldn't auto-include a body shop; etc. The preferred-provider
+ * concept is a per-relationship hint, not a universal address book.
+ *
+ * If we don't have a strong type signal (older rows with no provider_type),
+ * we conservatively only allow inclusion for the task types it could plausibly
+ * serve — i.e., service-flavored tasks. Refinance / insurance / sell never
+ * inherit an unknown preferred provider.
+ */
+function isPreferredCompatibleWithTask(
+  preferredType: string | null | undefined,
+  taskType: DispatchableTaskType
+): boolean {
+  const t = (preferredType ?? "").toLowerCase();
+  switch (taskType) {
+    case "recall_repair":
+      return t === "dealership_service" || t === "service_shop";
+    case "service_quote":
+      return (
+        t === "dealership_service" ||
+        t === "service_shop" ||
+        t === "oil_change" ||
+        t === "tire_shop" ||
+        t === "body_shop"
+      );
+    case "insurance_quote":
+      return t === "insurance_agent";
+    case "refinance":
+      // Only actual lenders. Service dealerships do NOT refinance — banks
+      // and credit unions do. Restrictive on purpose so we don't email a
+      // service writer asking for an APR quote.
+      return t === "lender" || t === "credit_union" || t === "bank";
+    case "sell_vehicle":
+      return t === "buying_center";
+  }
+}
+
+/**
  * Build the dispatch payload for a task: discover providers, generate the
  * email, and reuse any existing preferred provider. Returns null only if
  * we can't fetch user/vehicle context.
@@ -1750,6 +1789,15 @@ async function buildDispatchPayload(
       .limit(1)
   );
 
+  // Only auto-include the preferred provider when it's compatible with the
+  // current task. "Land Rover Marin" (dealership_service) should NOT show
+  // up in a refinance dispatch — dealers don't refinance.
+  const compatiblePreferred =
+    existingPreferred &&
+    isPreferredCompatibleWithTask((existingPreferred as any).provider_type, taskType)
+      ? existingPreferred
+      : null;
+
   // Discover up to 5 candidates via Google Places.
   const discovered = await discoverProvidersForTask({
     taskType,
@@ -1758,18 +1806,30 @@ async function buildDispatchPayload(
     maxResults: 5
   });
 
+  // For refinance, the lender ENTITY is what matters — "SF Federal Credit Union"
+  // at branch A and branch B are the same applicant pipeline. Dedupe the
+  // discovered list by name before persisting so the user sees one row, not
+  // two. For service / sales tasks we keep both because each location is an
+  // independent shop with its own inventory and writers.
+  const dedupedDiscovered =
+    taskType === "refinance"
+      ? Array.from(new Map(discovered.map((d) => [d.name.toLowerCase(), d])).values())
+      : discovered;
+
   // Upsert each discovered provider so it has an id we can dispatch to.
-  // Dedupe on (user_id, name, location) which is good enough for MVP.
+  // Dedupe key varies by task type — see comment above.
   const dept = taskTypeToContactDept(taskType);
   const inserted: any[] = [];
-  for (const d of discovered) {
-    const { data: existing } = await supabaseAdmin
+  for (const d of dedupedDiscovered) {
+    let lookup = supabaseAdmin
       .from("providers")
       .select("*")
       .eq("user_id", userId)
-      .eq("name", d.name)
-      .eq("location", d.location ?? "")
-      .maybeSingle();
+      .eq("name", d.name);
+    if (taskType !== "refinance") {
+      lookup = lookup.eq("location", d.location ?? "");
+    }
+    const { data: existing } = await lookup.maybeSingle();
 
     if (existing) {
       // Refresh published email if we now have a verified one and the row didn't.
@@ -1830,10 +1890,11 @@ async function buildDispatchPayload(
     }
   }
 
-  // If user has a preferred provider that's not in the discovered list, prepend it.
+  // If user has a preferred provider that's compatible with this task and not
+  // already in the discovered list, prepend it.
   let providers = inserted;
-  if (existingPreferred && !providers.find((p) => p.id === (existingPreferred as any).id)) {
-    const pref = existingPreferred as any;
+  if (compatiblePreferred && !providers.find((p) => p.id === (compatiblePreferred as any).id)) {
+    const pref = compatiblePreferred as any;
     const resolved = pickProviderEmailForDept(
       pref.contacts as Record<string, string>,
       pref.email,
@@ -1884,7 +1945,7 @@ async function buildDispatchPayload(
 
   return {
     providers,
-    preferred_provider_id: (existingPreferred as any)?.id ?? null,
+    preferred_provider_id: (compatiblePreferred as any)?.id ?? null,
     email_preview: { subject, body },
     // Insurance providers need a DL number/state to issue a real quote.
     // Surface this to the frontend so the UI can collect it before dispatch
