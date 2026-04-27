@@ -1052,6 +1052,9 @@ label.checkbox-row a {
   display: flex;
   flex-direction: column;
   background: #f7faf3;
+  overflow-x: hidden;
+  width: 100%;
+  max-width: 100vw;
 }
 .public-nav {
   display: flex;
@@ -1246,7 +1249,14 @@ label.checkbox-row a {
   padding: 64px 0;
   border-top: 1px solid #e1e6dd;
 }
-.landing-section-alt { background: #fdfcf3; margin: 0 -100vw; padding: 64px 100vw; border-top: 1px solid #e4d294; border-bottom: 1px solid #e4d294; }
+.landing-section-alt {
+  background: #fdfcf3;
+  border-top-color: #e4d294;
+  border-bottom: 1px solid #e4d294;
+  border-radius: 12px;
+  padding: 56px 28px;
+  margin: 0;
+}
 .landing-section-title {
   font-size: 32px;
   margin: 0 0 8px 0;
