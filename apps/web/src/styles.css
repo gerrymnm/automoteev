@@ -500,6 +500,139 @@ label.checkbox-row a {
 .extraction-preview ul { margin: 8px 0; padding-left: 16px; }
 .extraction-preview li { padding: 2px 0; }
 
+/* ---------- Priority Actions panel (top of Status page) ---------- */
+.priority-actions {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 22px;
+}
+.priority-section {
+  border-radius: 12px;
+  border: 1px solid;
+  padding: 14px 16px;
+}
+.priority-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.priority-urgent {
+  background: linear-gradient(180deg, #fde2d6 0%, #fef5ef 100%);
+  border-color: #d99878;
+}
+.priority-urgent .priority-section-head { color: #7c2e10; }
+.priority-urgent .priority-section-head svg { color: #c5683b; }
+.priority-recommended {
+  background: linear-gradient(180deg, #fff5d6 0%, #fffbe9 100%);
+  border-color: #e4d294;
+}
+.priority-recommended .priority-section-head { color: #6f5a13; }
+.priority-recommended .priority-section-head svg { color: #b88f1c; }
+
+/* Recall card inside urgent section */
+.priority-recall-card {
+  background: white;
+  border: 1px solid #e2c4b3;
+  border-radius: 10px;
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.priority-recall-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.priority-recall-head > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.priority-recall-head strong { color: #7c2e10; font-size: 15px; }
+.priority-recall-head p { margin: 4px 0 0 0; }
+.recall-cta {
+  flex-shrink: 0;
+  background: #c5683b;
+  font-size: 13px;
+  padding: 9px 14px;
+}
+.recall-cta:hover { background: #a8542d; }
+@media (max-width: 860px) {
+  .priority-recall-head { flex-direction: column; }
+  .recall-cta { width: 100%; justify-content: center; }
+}
+
+/* Insight rows inside priority sections */
+.priority-insight-row {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid;
+  background: white;
+  margin-bottom: 8px;
+  text-align: left;
+  transition: transform 0.08s ease, box-shadow 0.12s ease;
+  cursor: pointer;
+  align-items: center;
+}
+.priority-insight-row:last-child { margin-bottom: 0; }
+.priority-insight-row:hover { transform: translateY(-1px); box-shadow: 0 4px 10px rgba(0,0,0,0.06); }
+.priority-insight-row:disabled { opacity: 0.6; cursor: wait; }
+.priority-row-urgent { border-color: #d99878; }
+.priority-row-recommended { border-color: #e4d294; }
+.priority-row-icon {
+  flex-shrink: 0;
+  width: 36px; height: 36px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  background: #fef5ef;
+}
+.priority-row-recommended .priority-row-icon { background: #fffbe9; }
+.priority-row-urgent .priority-row-icon { color: #c5683b; }
+.priority-row-recommended .priority-row-icon { color: #b88f1c; }
+.priority-row-body { flex: 1 1 auto; min-width: 0; }
+.priority-row-title {
+  font-weight: 700;
+  font-size: 15px;
+  margin-bottom: 2px;
+}
+.priority-row-text {
+  color: #2a3530;
+  margin-bottom: 4px;
+  line-height: 1.4;
+}
+.priority-row-savings {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 700;
+  color: #1f4a2c;
+  background: #d8ebdc;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.priority-row-cta {
+  flex-shrink: 0;
+  font-weight: 600;
+  font-size: 13px;
+  color: #176b5d;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+@media (max-width: 860px) {
+  .priority-insight-row { padding: 10px 12px; }
+  .priority-row-cta { font-size: 12px; }
+  .priority-row-title { font-size: 14px; }
+}
+
 /* ---------- Highlight just-created task ---------- */
 .task-card.highlight {
   border-color: #176b5d;

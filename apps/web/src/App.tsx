@@ -535,8 +535,16 @@ function Status({
   const status = dashboard.vehicle.overall_status;
   const statusColor = status === "all_good" ? "green" : status === "action_needed" ? "red" : "yellow";
   const statusText = status === "all_good" ? "All good" : status === "action_needed" ? "Action needed" : "Action recommended";
-  const otherInsights = dashboard.insights.filter((i) => i.key !== dashboard.recommended_action?.key);
   const totalSavings = dashboard.total_estimated_annual_savings_usd;
+
+  // Priority actions = recalls (always urgent) + urgent insights + recommended insights.
+  // Info-level insights are deprioritized to the bottom panel so the top stays focused
+  // on things that actually need the owner to act.
+  const urgentInsights = dashboard.insights.filter((i) => i.severity === "urgent");
+  const recommendedInsights = dashboard.insights.filter((i) => i.severity === "recommended");
+  const infoInsights = dashboard.insights.filter((i) => i.severity === "info");
+  const hasRecalls = dashboard.open_recalls.length > 0;
+  const hasPriority = hasRecalls || urgentInsights.length > 0 || recommendedInsights.length > 0;
 
   return (
     <section className="status-layout">
@@ -562,11 +570,13 @@ function Status({
           </div>
         )}
 
-        {dashboard.recommended_action && (
-          <RecommendedAction
-            insight={dashboard.recommended_action}
-            onAct={() => onActOnInsight(dashboard.recommended_action!)}
-            busy={actBusyKey === dashboard.recommended_action.key}
+        {hasPriority && (
+          <PriorityActions
+            recalls={dashboard.open_recalls}
+            urgentInsights={urgentInsights}
+            recommendedInsights={recommendedInsights}
+            onActOnInsight={onActOnInsight}
+            actBusyKey={actBusyKey}
           />
         )}
 
@@ -594,16 +604,15 @@ function Status({
           />
         </div>
 
-        {dashboard.open_recalls.length > 0 && <RecallList recalls={dashboard.open_recalls} />}
         {dashboard.maintenance_items.length > 0 && <MaintenanceList items={dashboard.maintenance_items} />}
 
         <DocumentDropZone vehicleId={vehicleId} onComplete={onRefresh} />
       </div>
 
       <aside className="side-panel">
-        {otherInsights.length > 0 && (
+        {infoInsights.length > 0 && (
           <ImprovementsPanel
-            insights={otherInsights}
+            insights={infoInsights}
             onAct={onActOnInsight}
             actBusyKey={actBusyKey}
           />
@@ -616,6 +625,193 @@ function Status({
         </div>
       </aside>
     </section>
+  );
+}
+
+// ============================================================
+// PRIORITY ACTIONS — top-of-page color-coded urgency panel.
+// Combines open recalls (always urgent), urgent insights, and recommended
+// insights into a single panel. The user sees what to do, in priority order,
+// before scrolling to anything else.
+// ============================================================
+function PriorityActions({
+  recalls,
+  urgentInsights,
+  recommendedInsights,
+  onActOnInsight,
+  actBusyKey
+}: {
+  recalls: RecallRecord[];
+  urgentInsights: Insight[];
+  recommendedInsights: Insight[];
+  onActOnInsight: (insight: Insight) => void;
+  actBusyKey: string | null;
+}) {
+  // If we're already showing the recall card, fold its CTA into the card and
+  // suppress the standalone recall_repair insight row — otherwise the user sees
+  // two cards stacked saying the same thing.
+  const recallInsight = urgentInsights.find(
+    (i) => i.action.type === "create_task" && i.action.task_type === "recall_repair"
+  );
+  const otherUrgentInsights = urgentInsights.filter(
+    (i) => !(i.action.type === "create_task" && i.action.task_type === "recall_repair")
+  );
+  const hasUrgent = recalls.length > 0 || otherUrgentInsights.length > 0;
+  const hasRecommended = recommendedInsights.length > 0;
+  return (
+    <div className="priority-actions">
+      {hasUrgent && (
+        <section className="priority-section priority-urgent">
+          <div className="priority-section-head">
+            <AlertTriangle size={18} />
+            <strong>Urgent — act soon</strong>
+          </div>
+          {recalls.length > 0 && (
+            <PriorityRecallCard
+              recalls={recalls}
+              insight={recallInsight}
+              onAct={() => recallInsight && onActOnInsight(recallInsight)}
+              busy={Boolean(recallInsight && actBusyKey === recallInsight.key)}
+            />
+          )}
+          {otherUrgentInsights.map((i) => (
+            <PriorityInsightRow
+              key={i.key}
+              insight={i}
+              tone="urgent"
+              onAct={() => onActOnInsight(i)}
+              busy={actBusyKey === i.key}
+            />
+          ))}
+        </section>
+      )}
+
+      {hasRecommended && (
+        <section className="priority-section priority-recommended">
+          <div className="priority-section-head">
+            <Sparkles size={18} />
+            <strong>Recommended — savings &amp; improvements</strong>
+          </div>
+          {recommendedInsights.map((i) => (
+            <PriorityInsightRow
+              key={i.key}
+              insight={i}
+              tone="recommended"
+              onAct={() => onActOnInsight(i)}
+              busy={actBusyKey === i.key}
+            />
+          ))}
+        </section>
+      )}
+    </div>
+  );
+}
+
+// Single "open recalls" card inside the urgent section. The actual list of
+// recalls renders as expandable details rows underneath the header so the user
+// can dig into specifics without leaving the priority panel.
+function PriorityRecallCard({
+  recalls,
+  insight,
+  onAct,
+  busy
+}: {
+  recalls: RecallRecord[];
+  insight: Insight | undefined;
+  onAct: () => void;
+  busy: boolean;
+}) {
+  return (
+    <div className="priority-recall-card">
+      <div className="priority-recall-head">
+        <div>
+          <strong>{recalls.length} open recall{recalls.length === 1 ? "" : "s"} on your vehicle</strong>
+          <p className="small muted">
+            Recall repairs are free at any authorized dealer. Tap a row for what's affected.
+          </p>
+        </div>
+        {insight && (
+          <button className="primary recall-cta" type="button" onClick={onAct} disabled={busy}>
+            {busy ? (
+              <><Loader2 size={16} className="spinner" /> Finding dealers…</>
+            ) : (
+              <>{insight.cta_label} <ChevronRight size={14} /></>
+            )}
+          </button>
+        )}
+      </div>
+      {recalls.map((r) => (
+        <details className="recall-item" key={r.id}>
+          <summary>
+            <AlertTriangle size={16} className="recall-icon" />
+            <div className="recall-summary-text">
+              <strong>{r.component ?? "Recall campaign"}</strong>
+              <span className="muted small">Campaign #{r.nhtsa_campaign_id}</span>
+            </div>
+            <ChevronRight size={16} className="recall-chev" />
+          </summary>
+          <div className="recall-details">
+            {r.summary && (
+              <p className="small"><strong>What's affected:</strong> {r.summary}</p>
+            )}
+            {r.remedy && (
+              <p className="small"><strong>Remedy:</strong> {r.remedy}</p>
+            )}
+            {r.reported_at && (
+              <p className="small muted">
+                Reported {new Date(r.reported_at).toLocaleDateString()}
+              </p>
+            )}
+            <a
+              className="small recall-nhtsa-link"
+              href={`https://www.nhtsa.gov/recalls?nhtsaId=${r.nhtsa_campaign_id}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              View on NHTSA ↗
+            </a>
+          </div>
+        </details>
+      ))}
+    </div>
+  );
+}
+
+function PriorityInsightRow({
+  insight,
+  tone,
+  onAct,
+  busy
+}: {
+  insight: Insight;
+  tone: "urgent" | "recommended";
+  onAct: () => void;
+  busy: boolean;
+}) {
+  return (
+    <button
+      className={`priority-insight-row priority-row-${tone}`}
+      onClick={onAct}
+      disabled={busy}
+      type="button"
+    >
+      <div className="priority-row-icon">
+        {busy ? <Loader2 size={18} className="spinner" /> :
+          tone === "urgent" ? <AlertTriangle size={18} /> :
+          insight.category === "insurance" || insight.category === "lending" ? <DollarSign size={18} /> :
+          <Sparkles size={18} />}
+      </div>
+      <div className="priority-row-body">
+        <div className="priority-row-title">{insight.title}</div>
+        <div className="priority-row-text small">{insight.body}</div>
+        {insight.estimated_savings_usd_per_year ? (
+          <div className="priority-row-savings">~${insight.estimated_savings_usd_per_year}/yr potential savings</div>
+        ) : null}
+      </div>
+      <div className="priority-row-cta">
+        {busy ? "Working…" : insight.cta_label} <ChevronRight size={14} />
+      </div>
+    </button>
   );
 }
 
