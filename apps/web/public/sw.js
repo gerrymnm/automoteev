@@ -58,7 +58,17 @@ self.addEventListener("notificationclick", (event) => {
       });
       for (const client of allClients) {
         if ("focus" in client) {
-          // Navigate the focused tab to the target URL, then bring it forward.
+          // Two-prong navigation: client.navigate() reloads the URL, but on
+          // an already-open SPA that's already at /app, React doesn't
+          // re-mount and the deep-link useEffect (which only fires on mount)
+          // misses the new query params. So we ALSO postMessage the URL to
+          // the client, which it listens for and handles in-app via setTab
+          // and setHistoryAutoExpandTaskId. Whichever path lands first wins.
+          try {
+            client.postMessage({ type: "automoteev:deep-link", url: targetUrl });
+          } catch (err) {
+            // postMessage is best-effort; ignore if the channel is dead.
+          }
           if ("navigate" in client) {
             try {
               await client.navigate(targetUrl);

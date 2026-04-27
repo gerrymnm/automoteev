@@ -809,15 +809,42 @@ function Product({ session }: { session: Session }) {
   // parse those params on mount, switch to the right tab, expand the task,
   // then strip the params so a refresh doesn't re-trigger the deep-link.
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const requestedTab = params.get("tab");
-    const requestedTask = params.get("task");
-    if (requestedTab === "history") {
-      setTab("history");
-      if (requestedTask) setHistoryAutoExpandTaskId(requestedTask);
-      // Clean up the URL so future renders don't keep applying the deep-link.
-      window.history.replaceState({}, "", "/app");
+    const applyDeepLink = (rawUrl: string) => {
+      try {
+        const url = new URL(rawUrl, window.location.origin);
+        const requestedTab = url.searchParams.get("tab");
+        const requestedTask = url.searchParams.get("task");
+        if (requestedTab === "history") {
+          setTab("history");
+          if (requestedTask) setHistoryAutoExpandTaskId(requestedTask);
+          // Clean up the URL so future renders don't keep applying the deep-link.
+          window.history.replaceState({}, "", "/app");
+        }
+      } catch {
+        // Malformed URL — ignore.
+      }
+    };
+
+    // 1. On mount, apply any params already in the address bar (works when
+    //    the SW just navigated this tab or when the app was opened fresh).
+    applyDeepLink(window.location.href);
+
+    // 2. Listen for service worker postMessages — covers the case where the
+    //    tab was already open at /app and SW navigation didn't re-mount React.
+    const onSwMessage = (event: MessageEvent) => {
+      const msg = event.data;
+      if (msg && msg.type === "automoteev:deep-link" && typeof msg.url === "string") {
+        applyDeepLink(msg.url);
+      }
+    };
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.addEventListener("message", onSwMessage);
     }
+    return () => {
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.removeEventListener("message", onSwMessage);
+      }
+    };
   }, []);
 
   // Don't decide between Onboarding vs Status until the first fetch completes —

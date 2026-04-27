@@ -134,19 +134,61 @@ webhooks.post("/webhooks/email/inbound", async (req: Request, res: Response) => 
   const threadId = data?.threadId ?? inReplyTo ?? null;
 
   // Try to find the originating outbound email to link the thread.
+  // Strategy: (1) exact match on In-Reply-To header (the spec-correct way),
+  //           (2) fallback to sender-domain match against this user's most
+  //               recent outbound emails (handles dealers who click "compose
+  //               new" instead of "reply", which strips In-Reply-To).
   let taskId: string | null = null;
   let providerId: string | null = null;
   let originalToEmail: string | null = null;
+  let matchStrategy: "in_reply_to" | "domain_fallback" | "none" = "none";
+
   if (inReplyTo) {
     const { data: original } = await supabaseAdmin
       .from("task_emails")
       .select("task_id, provider_id, to_email")
       .eq("provider_message_id", inReplyTo)
       .maybeSingle();
-    taskId = original?.task_id ?? null;
-    providerId = original?.provider_id ?? null;
-    originalToEmail = original?.to_email ?? null;
+    if (original?.task_id) {
+      taskId = original.task_id;
+      providerId = original.provider_id ?? null;
+      originalToEmail = original.to_email ?? null;
+      matchStrategy = "in_reply_to";
+    }
   }
+
+  // Domain fallback: match the sender's domain against the recipient domain
+  // of any of this user's recent outbound emails (last 30 days). The most
+  // recent match wins. Only proceeds if In-Reply-To match failed.
+  if (!taskId && fromAddress) {
+    const fromDomain = fromAddress.split("@")[1]?.toLowerCase() ?? null;
+    if (fromDomain) {
+      const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
+      const { data: recentOut } = await supabaseAdmin
+        .from("task_emails")
+        .select("task_id, provider_id, to_email")
+        .eq("user_id", profile.id)
+        .eq("direction", "outbound")
+        .gte("created_at", since)
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      const match = (recentOut ?? []).find((row: any) => {
+        const toDomain = (row.to_email as string | null)?.split("@")[1]?.toLowerCase() ?? null;
+        return toDomain === fromDomain;
+      });
+      if (match) {
+        taskId = (match as any).task_id ?? null;
+        providerId = (match as any).provider_id ?? null;
+        originalToEmail = (match as any).to_email ?? null;
+        matchStrategy = "domain_fallback";
+      }
+    }
+  }
+
+  console.log(
+    `[inbound] match strategy=${matchStrategy} task=${taskId ?? "null"} provider=${providerId ?? "null"}`
+  );
 
   // ---- Reply-learning (PER DEPARTMENT) -----------------------------------
   // A dealership has multiple humans in multiple inboxes — service writer,
@@ -211,7 +253,11 @@ webhooks.post("/webhooks/email/inbound", async (req: Request, res: Response) => 
   }
   // ------------------------------------------------------------------------
 
-  await supabaseAdmin.from("task_emails").insert({
+  // Insert with explicit error capture — the Supabase client returns
+  // { error } rather than throwing on constraint failures, so without this
+  // the webhook would silently lose inbound emails (as happened with the
+  // first dealer reply where task_id was NOT NULL and we passed null).
+  const { error: insertError } = await supabaseAdmin.from("task_emails").insert({
     user_id: profile.id,
     task_id: taskId,
     provider_id: providerId,
@@ -227,7 +273,12 @@ webhooks.post("/webhooks/email/inbound", async (req: Request, res: Response) => 
     received_at: new Date().toISOString()
   });
 
-  console.log("[inbound] stored email for user:", profile.id);
+  if (insertError) {
+    console.error("[inbound] FAILED to store email:", insertError);
+    return res.status(500).json({ error: "insert_failed", detail: insertError.message });
+  }
+
+  console.log(`[inbound] stored email for user: ${profile.id} (task=${taskId ?? "unlinked"})`);
 
   // Push notification: this is the moment the user has been waiting for —
   // someone replied. Fire an ambient notification to all their devices so
