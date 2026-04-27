@@ -909,6 +909,14 @@ label.checkbox-row a {
   font-size: 12px; color: #7a5a10; background: #fff0c7;
   padding: 2px 6px; border-radius: 999px;
 }
+/* Distance chip — sits next to rating in the dealer header. Green tint signals
+   "closer is better" since distance carries more weight than rating in sort. */
+.dealer-distance {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; color: #1f4a2c; background: #d8ebdc;
+  padding: 2px 6px; border-radius: 999px;
+  font-weight: 600;
+}
 .dealer-meta {
   display: flex; align-items: center; gap: 6px;
   color: #4d5a53; font-size: 12px;

@@ -1,4 +1,4 @@
-import { searchProviders, type FoundProvider } from "./places.js";
+import { searchProviders, geocodeZip, haversineMiles, type FoundProvider } from "./places.js";
 
 /**
  * Dealer / provider discovery for a specific task.
@@ -21,6 +21,8 @@ export interface DiscoveredProvider extends FoundProvider {
   derived_email: string | null;
   /** "verified" = scraped from a public page; "none" = not found. We do NOT guess. */
   derived_email_basis: "verified" | "none";
+  /** Distance from the user's ZIP, in miles. Null if we couldn't geocode either side. */
+  distance_miles: number | null;
 }
 
 export type DispatchableTaskType =
@@ -74,12 +76,22 @@ export async function discoverProvidersForTask(params: {
     vehicleMake: params.vehicleMake
   });
 
+  // Resolve the user's ZIP to lat/lng so we can compute true distance to each
+  // dealer. If geocoding fails we fall back to rating-only ranking, but the
+  // common path resolves and uses the distance-weighted formula below.
+  const userLoc = params.zipCode ? await geocodeZip(params.zipCode) : null;
+
   const found = await searchProviders({
     providerType: query,
     zipCode: params.zipCode ?? null
   });
 
-  const candidates = found.slice(0, params.maxResults ?? 5);
+  // Stage 1: rank a wider candidate pool BEFORE we do the (slow) website
+  // scrapes, so we don't waste time fetching pages from dealers that won't
+  // make the final cut. We pull up to 8 raw candidates, rank them, then take
+  // the top maxResults (default 5) for scraping.
+  const ranked = rankByDistanceAndRating(found, userLoc);
+  const candidates = ranked.slice(0, params.maxResults ?? 5);
 
   // Scrape websites in parallel for verified emails. Bounded concurrency via
   // Promise.all on a small list. Each fetch has its own timeout.
@@ -98,6 +110,75 @@ export async function discoverProvidersForTask(params: {
   );
 
   return enriched;
+}
+
+/**
+ * Combined distance + rating ranking.
+ *
+ * The user's stated preference: distance carries more weight than rating —
+ * a recall service trip is a matter of convenience, and a 4.9-star dealer
+ * 30 miles away is less useful than a 4.2-star dealer 5 minutes away.
+ *
+ * Formula (higher score = better):
+ *   score = (1 - normalized_distance) * 0.70 + normalized_rating * 0.30
+ *
+ * Where:
+ *   normalized_distance = clamp(miles / 50, 0..1)   (50mi cap; beyond that, distance penalty maxes out)
+ *   normalized_rating   = clamp((rating - 3) / 2, 0..1)   (3.0 = 0pts, 5.0 = full pts)
+ *
+ * Quality floor: dealers with rating < 3.5 AND fewer than 100 ratings get
+ * pushed to the bottom regardless of how close they are. We don't want to
+ * recommend a 2.5-star shop just because it's nearby — the agent's job is
+ * to suggest places worth using, not just nearest.
+ *
+ * Dealers we couldn't geocode end up at the bottom (treated as 50mi).
+ * Dealers without a rating are treated as 3.0 (neutral).
+ *
+ * Logs a summary at end so we can tell from prod logs whether distance
+ * actually made it into the ranking or we silently fell back to ratings.
+ */
+export function rankByDistanceAndRating<T extends FoundProvider>(
+  providers: T[],
+  userLoc: { lat: number; lng: number } | null
+): Array<T & { distance_miles: number | null }> {
+  const DIST_WEIGHT = 0.70;
+  const RATING_WEIGHT = 0.30;
+  const MAX_DIST_MILES = 50;
+  const QUALITY_RATING_FLOOR = 3.5;
+  const QUALITY_REVIEW_FLOOR = 100;
+
+  let geocodedCount = 0;
+  const withScores = providers.map((p) => {
+    const distance =
+      userLoc != null && p.lat != null && p.lng != null
+        ? haversineMiles(userLoc, { lat: p.lat, lng: p.lng })
+        : null;
+    if (distance != null) geocodedCount++;
+
+    const normDist = Math.min((distance ?? MAX_DIST_MILES) / MAX_DIST_MILES, 1);
+    const rating = p.rating ?? 3;
+    const ratingCount = p.rating_count ?? 0;
+    const normRating = Math.max(0, Math.min((rating - 3) / 2, 1));
+
+    let score = (1 - normDist) * DIST_WEIGHT + normRating * RATING_WEIGHT;
+
+    // Quality floor: penalize sketchy-looking shops so they sink even if close.
+    // Both signals matter — a high rating with very few reviews is gameable.
+    const sketchy = rating < QUALITY_RATING_FLOOR && ratingCount < QUALITY_REVIEW_FLOOR;
+    if (sketchy) score -= 0.5;
+
+    return { ...p, distance_miles: distance, _score: score };
+  });
+
+  withScores.sort((a, b) => b._score - a._score);
+
+  console.log(
+    `[ranking] ${providers.length} providers, ${geocodedCount} with distance` +
+      (userLoc ? "" : " (no userLoc — falling back to rating-only)")
+  );
+
+  // Strip the internal _score field from the public shape.
+  return withScores.map(({ _score: _ignored, ...rest }) => rest);
 }
 
 /**

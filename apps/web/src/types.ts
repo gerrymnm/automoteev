@@ -123,6 +123,8 @@ export interface DispatchProvider extends Provider {
   rating?: number | null;
   rating_count?: number | null;
   website?: string | null;
+  /** Distance from user's ZIP, in miles. Null if user ZIP isn't geocodable. */
+  distance_miles?: number | null;
 }
 
 export interface DispatchPayload {

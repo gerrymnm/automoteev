@@ -37,6 +37,86 @@ export interface FoundProvider extends ProviderInput {
   rating: number | null;
   rating_count: number | null;
   website: string | null;
+  /** Latitude/longitude from Google Places. Used for distance-weighted ranking. */
+  lat: number | null;
+  lng: number | null;
+}
+
+/**
+ * Geocode a US ZIP code to lat/lng using Google Geocoding API.
+ * Returns null if the API key is missing, the ZIP can't be resolved, or any
+ * network error occurs. Cached in-memory per process so the same ZIP is only
+ * resolved once per Railway instance lifetime.
+ */
+const zipCache = new Map<string, { lat: number; lng: number } | null>();
+export async function geocodeZip(
+  zipCode: string
+): Promise<{ lat: number; lng: number } | null> {
+  if (!env.GOOGLE_MAPS_API_KEY) {
+    console.warn("[geocode] GOOGLE_MAPS_API_KEY missing — distance ranking disabled");
+    return null;
+  }
+  const normalized = zipCode.trim();
+  if (!/^\d{5}$/.test(normalized)) {
+    console.warn(`[geocode] invalid ZIP shape: ${zipCode}`);
+    return null;
+  }
+  if (zipCache.has(normalized)) return zipCache.get(normalized) ?? null;
+
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?components=postal_code:${normalized}|country:US&key=${env.GOOGLE_MAPS_API_KEY}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.warn(`[geocode] HTTP ${res.status} for ZIP ${normalized}`);
+      zipCache.set(normalized, null);
+      return null;
+    }
+    const json = (await res.json()) as {
+      status?: string;
+      error_message?: string;
+      results?: Array<{ geometry?: { location?: { lat: number; lng: number } } }>;
+    };
+    const loc = json.results?.[0]?.geometry?.location;
+    if (json.status === "OK" && loc?.lat != null && loc?.lng != null) {
+      const result = { lat: loc.lat, lng: loc.lng };
+      zipCache.set(normalized, result);
+      console.log(`[geocode] resolved ${normalized} → ${result.lat.toFixed(4)},${result.lng.toFixed(4)}`);
+      return result;
+    }
+    // Common failure modes: REQUEST_DENIED (key restricted), OVER_QUERY_LIMIT,
+    // ZERO_RESULTS. We log status + error_message so we can tell which one.
+    console.warn(
+      `[geocode] non-OK status for ZIP ${normalized}: status=${json.status} message=${json.error_message ?? "(none)"}`
+    );
+    zipCache.set(normalized, null);
+    return null;
+  } catch (err) {
+    console.warn(`[geocode] threw for ZIP ${normalized}:`, err);
+    zipCache.set(normalized, null);
+    return null;
+  }
+}
+
+/**
+ * Haversine distance between two lat/lng points, in miles.
+ * Used to rank dealers by how convenient they actually are for the user.
+ */
+export function haversineMiles(
+  a: { lat: number; lng: number },
+  b: { lat: number; lng: number }
+): number {
+  const R = 3958.8; // Earth radius in miles
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const sinDLat = Math.sin(dLat / 2);
+  const sinDLng = Math.sin(dLng / 2);
+  const h =
+    sinDLat * sinDLat +
+    Math.cos(lat1) * Math.cos(lat2) * sinDLng * sinDLng;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
 export async function searchProviders(params: {
@@ -87,21 +167,19 @@ export async function searchProviders(params: {
   const json = (await res.json()) as PlacesTextSearchResponse;
   const places = json.places ?? [];
 
-  return places
-    .map<FoundProvider>((p) => ({
-      external_id: p.id,
-      name: p.displayName?.text ?? "Unnamed provider",
-      email: null,
-      phone: p.nationalPhoneNumber ?? null,
-      provider_type: params.providerType,
-      location: p.formattedAddress ?? null,
-      rating: p.rating ?? null,
-      rating_count: p.userRatingCount ?? null,
-      website: p.websiteUri ?? null
-    }))
-    .sort((a, b) => {
-      const aScore = (a.rating ?? 0) * Math.log10((a.rating_count ?? 0) + 10);
-      const bScore = (b.rating ?? 0) * Math.log10((b.rating_count ?? 0) + 10);
-      return bScore - aScore;
-    });
+  return places.map<FoundProvider>((p) => ({
+    external_id: p.id,
+    name: p.displayName?.text ?? "Unnamed provider",
+    email: null,
+    phone: p.nationalPhoneNumber ?? null,
+    provider_type: params.providerType,
+    location: p.formattedAddress ?? null,
+    rating: p.rating ?? null,
+    rating_count: p.userRatingCount ?? null,
+    website: p.websiteUri ?? null,
+    lat: p.location?.latitude ?? null,
+    lng: p.location?.longitude ?? null
+  }));
+  // Note: ranking happens in dealer-discovery.ts with distance + rating weights,
+  // since that's where we have the user's lat/lng.
 }

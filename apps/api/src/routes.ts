@@ -1701,7 +1701,8 @@ async function buildDispatchPayload(
         derived_email_basis: resolved ? "verified" : "none",
         rating: d.rating,
         rating_count: d.rating_count,
-        website: d.website
+        website: d.website,
+        distance_miles: d.distance_miles
       });
     } else {
       const { data: created } = await supabaseAdmin
@@ -1729,7 +1730,8 @@ async function buildDispatchPayload(
           derived_email_basis: d.derived_email_basis,
           rating: d.rating,
           rating_count: d.rating_count,
-          website: d.website
+          website: d.website,
+          distance_miles: d.distance_miles
         });
       }
     }
@@ -1751,7 +1753,8 @@ async function buildDispatchPayload(
         derived_email_basis: resolved ? "verified" : "none",
         rating: null,
         rating_count: null,
-        website: null
+        website: null,
+        distance_miles: null
       },
       ...providers
     ];

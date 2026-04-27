@@ -2285,6 +2285,11 @@ function DispatchModal({
                 <div className="dealer-info">
                   <div className="dealer-name">
                     <strong>{p.name}</strong>
+                    {p.distance_miles != null && (
+                      <span className="dealer-distance" title="Distance from your ZIP">
+                        <MapPin size={12} /> {formatDistance(p.distance_miles)}
+                      </span>
+                    )}
                     {p.rating != null && (
                       <span className="dealer-rating">
                         <Star size={12} /> {p.rating.toFixed(1)}
@@ -2901,6 +2906,14 @@ function Field({
 function truncate(input: string, max: number): string {
   if (input.length <= max) return input;
   return `${input.slice(0, max - 1).trimEnd()}…`;
+}
+
+// Format a Haversine distance for display. Sub-mile shows as "<1 mi", whole
+// numbers above 10 round to integer ("24 mi"), everything else gets one decimal.
+function formatDistance(miles: number): string {
+  if (miles < 1) return "<1 mi";
+  if (miles >= 10) return `${Math.round(miles)} mi`;
+  return `${miles.toFixed(1)} mi`;
 }
 
 function normalizeForm<T extends Record<string, string>>(form: T) {
