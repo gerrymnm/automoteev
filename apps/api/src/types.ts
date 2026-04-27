@@ -26,14 +26,18 @@ export type TaskStatus =
 export type TaskType =
   | "recall_check"
   | "recall_appointment"
+  | "recall_repair"
   | "maintenance_quote"
   | "service_appointment"
+  | "service_quote"
   | "insurance_quote"
   | "insurance_review"
+  | "refinance"
   | "refinance_review"
   | "payoff_request"
   | "lease_end_review"
   | "sell_vehicle"
+  | "value_refresh"
   | "general_owner_request";
 
 export type SubscriptionSource = "stripe" | "apple" | "google";

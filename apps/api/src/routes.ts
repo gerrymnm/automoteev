@@ -1729,14 +1729,31 @@ async function buildDispatchPayload(
 
   const vehicleName =
     `${vehicle.year ?? ""} ${vehicle.make ?? ""} ${vehicle.model ?? ""}`.trim() || "vehicle";
-  const subject = taskEmailSubject(task.task_type as TaskType, vehicleName);
+
+  // For recall tasks, pull open campaigns so we can list them in the email.
+  // The email is dramatically more likely to get a reply when the dealer can
+  // see the specific NHTSA IDs being asked about.
+  let recalls: { nhtsa_campaign_id: string; component: string | null }[] = [];
+  if (task.task_type === "recall_repair" || task.task_type === "recall_appointment") {
+    const { data: recallRows } = await supabaseAdmin
+      .from("recalls")
+      .select("nhtsa_campaign_id, component")
+      .eq("vehicle_id", vehicle.id)
+      .is("resolved_at", null);
+    recalls = recallRows ?? [];
+  }
+
+  const subject = taskEmailSubject(task.task_type as TaskType, vehicleName, {
+    recallCount: recalls.length
+  });
   const body = taskEmailBody({
     type: task.task_type as TaskType,
     userName: (profile as any).full_name,
     vehicleName,
     vin: vehicle.vin,
     mileage: vehicle.mileage,
-    notes: null
+    notes: null,
+    recalls
   });
 
   return {
@@ -1837,7 +1854,25 @@ router.post("/api/tasks/:id/dispatch", async (req, res) => {
   const vehicleName =
     `${(vehicle as any).year ?? ""} ${(vehicle as any).make ?? ""} ${(vehicle as any).model ?? ""}`.trim() ||
     "vehicle";
-  const subject = custom_subject ?? taskEmailSubject((task as any).task_type as TaskType, vehicleName);
+
+  // Re-fetch recalls for the actual send (in case the user reviewed the
+  // preview but recall data updated since).
+  let recalls: { nhtsa_campaign_id: string; component: string | null }[] = [];
+  const taskTypeForEmail = (task as any).task_type as string;
+  if (taskTypeForEmail === "recall_repair" || taskTypeForEmail === "recall_appointment") {
+    const { data: recallRows } = await supabaseAdmin
+      .from("recalls")
+      .select("nhtsa_campaign_id, component")
+      .eq("vehicle_id", (task as any).vehicle_id)
+      .is("resolved_at", null);
+    recalls = recallRows ?? [];
+  }
+
+  const subject =
+    custom_subject ??
+    taskEmailSubject((task as any).task_type as TaskType, vehicleName, {
+      recallCount: recalls.length
+    });
   const text =
     custom_body ??
     taskEmailBody({
@@ -1846,7 +1881,8 @@ router.post("/api/tasks/:id/dispatch", async (req, res) => {
       vehicleName,
       vin: (vehicle as any).vin,
       mileage: (vehicle as any).mileage,
-      notes: null
+      notes: null,
+      recalls
     });
 
   // Send to each provider that has an email. Track skips for the response.
