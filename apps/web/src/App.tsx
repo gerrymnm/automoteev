@@ -133,9 +133,9 @@ function AuthPanel() {
     <section className="auth-grid">
       <div className="intro">
         <div className="brand">Automoteev</div>
-        <h1>Save money on your car. Without lifting a finger.</h1>
+        <h1>Save money on your monthly expenses. Without lifting a finger.</h1>
         <p className="hero-sub-tagline">
-          Starting with your vehicle. Insurance, subscriptions, and recurring bills next.
+          Starting with your car. Insurance, subscriptions, and recurring bills next.
         </p>
         <p>
           Automoteev is the AI agent that watches your insurance, loan, and service costs,
@@ -184,6 +184,15 @@ function Product({ session }: { session: Session }) {
   const [initialLoaded, setInitialLoaded] = useState(false);
   const [dispatch, setDispatch] = useState<DispatchPayload | null>(null);
   const [openingDispatchTaskId, setOpeningDispatchTaskId] = useState<string | null>(null);
+  // When the user clicks "see sent email" on the recall card while outreach is
+  // in flight, we switch to the History tab and auto-expand the relevant task
+  // so they see the email thread immediately instead of having to hunt for it.
+  const [historyAutoExpandTaskId, setHistoryAutoExpandTaskId] = useState<string | null>(null);
+
+  function viewSentEmail(taskId: string) {
+    setHistoryAutoExpandTaskId(taskId);
+    setTab("history");
+  }
 
   /**
    * Open the DispatchModal for an existing task. Used when the user clicks
@@ -376,6 +385,7 @@ function Product({ session }: { session: Session }) {
           actBusyKey={actBusyKey}
           onOpenDispatch={openDispatchForTask}
           openingDispatchTaskId={openingDispatchTaskId}
+          onViewSentEmail={viewSentEmail}
         />
       )}
       {tab === "tasks" && dashboard && (
@@ -393,7 +403,7 @@ function Product({ session }: { session: Session }) {
         />
       )}
       {tab === "command" && selectedId && <Command vehicleId={selectedId} onCreated={refresh} />}
-      {tab === "history" && <History tasks={tasks} />}
+      {tab === "history" && <History tasks={tasks} autoExpandTaskId={historyAutoExpandTaskId} />}
       {tab === "settings" && <Settings autonomy={autonomy} />}
 
       {/* Mobile bottom nav */}
@@ -530,7 +540,8 @@ function Status({
   onActOnInsight,
   actBusyKey,
   onOpenDispatch,
-  openingDispatchTaskId
+  openingDispatchTaskId,
+  onViewSentEmail
 }: {
   dashboard: Dashboard;
   vehicleId: string;
@@ -540,6 +551,7 @@ function Status({
   actBusyKey: string | null;
   onOpenDispatch: (taskId: string) => void;
   openingDispatchTaskId: string | null;
+  onViewSentEmail: (taskId: string) => void;
 }) {
   const status = dashboard.vehicle.overall_status;
   const statusColor = status === "all_good" ? "green" : status === "action_needed" ? "red" : "yellow";
@@ -598,6 +610,7 @@ function Status({
             actBusyKey={actBusyKey}
             onOpenDispatch={onOpenDispatch}
             openingDispatchTaskId={openingDispatchTaskId}
+            onViewSentEmail={onViewSentEmail}
           />
         )}
 
@@ -663,7 +676,8 @@ function PriorityActions({
   onActOnInsight,
   actBusyKey,
   onOpenDispatch,
-  openingDispatchTaskId
+  openingDispatchTaskId,
+  onViewSentEmail
 }: {
   recalls: RecallRecord[];
   urgentInsights: Insight[];
@@ -673,6 +687,7 @@ function PriorityActions({
   actBusyKey: string | null;
   onOpenDispatch: (taskId: string) => void;
   openingDispatchTaskId: string | null;
+  onViewSentEmail: (taskId: string) => void;
 }) {
   // If we're already showing the recall card, fold its CTA into the card and
   // suppress the standalone recall_repair insight row — otherwise the user sees
@@ -712,6 +727,7 @@ function PriorityActions({
               activeTask={activeRecallTask}
               onAct={() => recallInsight && onActOnInsight(recallInsight)}
               onOpenDispatch={onOpenDispatch}
+              onViewSentEmail={onViewSentEmail}
               busy={
                 Boolean(recallInsight && actBusyKey === recallInsight.key) ||
                 Boolean(activeRecallTask && openingDispatchTaskId === activeRecallTask.id)
@@ -743,6 +759,7 @@ function PriorityActions({
               activeTask={activeRecallTask}
               onAct={() => undefined}
               onOpenDispatch={onOpenDispatch}
+              onViewSentEmail={onViewSentEmail}
               busy={Boolean(activeRecallTask && openingDispatchTaskId === activeRecallTask.id)}
               shrunk
             />
@@ -771,6 +788,7 @@ function PriorityRecallCard({
   activeTask,
   onAct,
   onOpenDispatch,
+  onViewSentEmail,
   busy,
   shrunk
 }: {
@@ -779,6 +797,7 @@ function PriorityRecallCard({
   activeTask: Task | null;
   onAct: () => void;
   onOpenDispatch: (taskId: string) => void;
+  onViewSentEmail: (taskId: string) => void;
   busy: boolean;
   shrunk?: boolean;
 }) {
@@ -803,9 +822,9 @@ function PriorityRecallCard({
                 <button
                   className="ghost small inline-edit"
                   type="button"
-                  onClick={() => onOpenDispatch(activeTask.id)}
+                  onClick={() => onViewSentEmail(activeTask.id)}
                 >
-                  view dispatch
+                  see what was sent
                 </button>
               )}
             </p>
@@ -1992,7 +2011,7 @@ function Command({ vehicleId, onCreated }: { vehicleId: string; onCreated: () =>
 // and audit trail. Backed by /api/tasks/:id/history which returns
 // { emails, audit_logs }. Closed tasks grouped by status; active tasks at top.
 // ============================================================
-function History({ tasks }: { tasks: Task[] }) {
+function History({ tasks, autoExpandTaskId }: { tasks: Task[]; autoExpandTaskId?: string | null }) {
   const active = tasks.filter((t) => !(["completed", "failed", "cancelled"].includes(t.status)));
   const closed = tasks.filter((t) => ["completed", "failed", "cancelled"].includes(t.status));
   const grouped = {
@@ -2014,10 +2033,10 @@ function History({ tasks }: { tasks: Task[] }) {
           <p className="muted">Nothing here yet. Approved and finished tasks will show up here.</p>
         ) : (
           <>
-            <HistoryGroup title="In progress" tasks={grouped.active} expandable />
-            <HistoryGroup title="Completed" tasks={grouped.completed} expandable />
-            <HistoryGroup title="Cancelled" tasks={grouped.cancelled} expandable />
-            <HistoryGroup title="Did not complete" tasks={grouped.failed} subtle expandable />
+            <HistoryGroup title="In progress" tasks={grouped.active} expandable autoExpandTaskId={autoExpandTaskId} />
+            <HistoryGroup title="Completed" tasks={grouped.completed} expandable autoExpandTaskId={autoExpandTaskId} />
+            <HistoryGroup title="Cancelled" tasks={grouped.cancelled} expandable autoExpandTaskId={autoExpandTaskId} />
+            <HistoryGroup title="Did not complete" tasks={grouped.failed} subtle expandable autoExpandTaskId={autoExpandTaskId} />
           </>
         )}
       </div>
@@ -2053,12 +2072,14 @@ function HistoryGroup({
   title,
   tasks,
   subtle,
-  expandable
+  expandable,
+  autoExpandTaskId
 }: {
   title: string;
   tasks: Task[];
   subtle?: boolean;
   expandable?: boolean;
+  autoExpandTaskId?: string | null;
 }) {
   if (!tasks.length) return null;
   return (
@@ -2066,7 +2087,13 @@ function HistoryGroup({
       <h3>{title} <span className="muted small" style={{ fontWeight: 400, textTransform: "none" }}>({tasks.length})</span></h3>
       <div className="history-list">
         {tasks.map((t) =>
-          expandable ? <HistoryTaskRow key={t.id} task={t} /> : (
+          expandable ? (
+            <HistoryTaskRow
+              key={t.id}
+              task={t}
+              autoExpand={autoExpandTaskId === t.id}
+            />
+          ) : (
             <div className="history-row" key={t.id}>
               <span className="history-title">{t.title}</span>
               <span className="muted small">{new Date(t.created_at).toLocaleDateString()}</span>
@@ -2078,31 +2105,48 @@ function HistoryGroup({
   );
 }
 
-function HistoryTaskRow({ task }: { task: Task }) {
-  const [open, setOpen] = useState(false);
+function HistoryTaskRow({ task, autoExpand }: { task: Task; autoExpand?: boolean }) {
+  const [open, setOpen] = useState(Boolean(autoExpand));
   const [history, setHistory] = useState<TaskHistoryResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const rowRef = useRef<HTMLDivElement>(null);
+
+  async function loadHistory() {
+    if (history || loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api<TaskHistoryResponse>(`/api/tasks/${task.id}/history`);
+      setHistory(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load history");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Auto-expand on mount when the deep-link prop matches this task. Also scroll
+  // it into view so the user lands directly on the email thread they came to see.
+  useEffect(() => {
+    if (autoExpand) {
+      setOpen(true);
+      void loadHistory();
+      requestAnimationFrame(() => {
+        rowRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoExpand]);
 
   async function toggle() {
     const next = !open;
     setOpen(next);
-    if (next && !history && !loading) {
-      setLoading(true);
-      setError(null);
-      try {
-        const data = await api<TaskHistoryResponse>(`/api/tasks/${task.id}/history`);
-        setHistory(data);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not load history");
-      } finally {
-        setLoading(false);
-      }
-    }
+    if (next) await loadHistory();
   }
 
   return (
-    <div className="history-task">
+    <div className="history-task" ref={rowRef}>
       <button className="history-task-head" type="button" onClick={toggle}>
         <ChevronRight
           size={16}
