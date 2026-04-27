@@ -370,9 +370,12 @@ function Product({ session }: { session: Session }) {
         <Status
           dashboard={dashboard}
           vehicleId={selectedId}
+          tasks={tasks}
           onRefresh={refresh}
           onActOnInsight={actOnInsight}
           actBusyKey={actBusyKey}
+          onOpenDispatch={openDispatchForTask}
+          openingDispatchTaskId={openingDispatchTaskId}
         />
       )}
       {tab === "tasks" && dashboard && (
@@ -522,15 +525,21 @@ function Onboarding({ onDone, email }: { onDone: () => void; email: string }) {
 function Status({
   dashboard,
   vehicleId,
+  tasks,
   onRefresh,
   onActOnInsight,
-  actBusyKey
+  actBusyKey,
+  onOpenDispatch,
+  openingDispatchTaskId
 }: {
   dashboard: Dashboard;
   vehicleId: string;
+  tasks: Task[];
   onRefresh: () => void;
   onActOnInsight: (insight: Insight) => void;
   actBusyKey: string | null;
+  onOpenDispatch: (taskId: string) => void;
+  openingDispatchTaskId: string | null;
 }) {
   const status = dashboard.vehicle.overall_status;
   const statusColor = status === "all_good" ? "green" : status === "action_needed" ? "red" : "yellow";
@@ -545,6 +554,15 @@ function Status({
   const infoInsights = dashboard.insights.filter((i) => i.severity === "info");
   const hasRecalls = dashboard.open_recalls.length > 0;
   const hasPriority = hasRecalls || urgentInsights.length > 0 || recommendedInsights.length > 0;
+
+  // Find any active recall_repair task so the recall card can show its current
+  // state (awaiting approval vs dispatched and waiting on dealer reply) instead
+  // of always shouting "act soon" when outreach has already gone out.
+  const activeRecallTask = tasks.find(
+    (t) =>
+      t.task_type === "recall_repair" &&
+      ["needs_user_approval", "approved", "in_progress", "waiting_on_provider"].includes(t.status)
+  ) ?? null;
 
   return (
     <section className="status-layout">
@@ -575,8 +593,11 @@ function Status({
             recalls={dashboard.open_recalls}
             urgentInsights={urgentInsights}
             recommendedInsights={recommendedInsights}
+            activeRecallTask={activeRecallTask}
             onActOnInsight={onActOnInsight}
             actBusyKey={actBusyKey}
+            onOpenDispatch={onOpenDispatch}
+            openingDispatchTaskId={openingDispatchTaskId}
           />
         )}
 
@@ -638,14 +659,20 @@ function PriorityActions({
   recalls,
   urgentInsights,
   recommendedInsights,
+  activeRecallTask,
   onActOnInsight,
-  actBusyKey
+  actBusyKey,
+  onOpenDispatch,
+  openingDispatchTaskId
 }: {
   recalls: RecallRecord[];
   urgentInsights: Insight[];
   recommendedInsights: Insight[];
+  activeRecallTask: Task | null;
   onActOnInsight: (insight: Insight) => void;
   actBusyKey: string | null;
+  onOpenDispatch: (taskId: string) => void;
+  openingDispatchTaskId: string | null;
 }) {
   // If we're already showing the recall card, fold its CTA into the card and
   // suppress the standalone recall_repair insight row — otherwise the user sees
@@ -656,8 +683,20 @@ function PriorityActions({
   const otherUrgentInsights = urgentInsights.filter(
     (i) => !(i.action.type === "create_task" && i.action.task_type === "recall_repair")
   );
-  const hasUrgent = recalls.length > 0 || otherUrgentInsights.length > 0;
-  const hasRecommended = recommendedInsights.length > 0;
+
+  // Recall card placement depends on task state:
+  //   - No task / needs_user_approval / approved → urgent (red), shows CTA
+  //   - in_progress / waiting_on_provider          → recommended (yellow), shrunk, status-only
+  //   The user shouldn't see "Urgent — act soon" once the agent is already on it.
+  const recallTaskInFlight =
+    activeRecallTask?.status === "in_progress" ||
+    activeRecallTask?.status === "waiting_on_provider";
+  const recallInUrgent = recalls.length > 0 && !recallTaskInFlight;
+  const recallInRecommended = recalls.length > 0 && recallTaskInFlight;
+
+  const hasUrgent = recallInUrgent || otherUrgentInsights.length > 0;
+  const hasRecommended = recallInRecommended || recommendedInsights.length > 0;
+
   return (
     <div className="priority-actions">
       {hasUrgent && (
@@ -666,12 +705,17 @@ function PriorityActions({
             <AlertTriangle size={18} />
             <strong>Urgent — act soon</strong>
           </div>
-          {recalls.length > 0 && (
+          {recallInUrgent && (
             <PriorityRecallCard
               recalls={recalls}
               insight={recallInsight}
+              activeTask={activeRecallTask}
               onAct={() => recallInsight && onActOnInsight(recallInsight)}
-              busy={Boolean(recallInsight && actBusyKey === recallInsight.key)}
+              onOpenDispatch={onOpenDispatch}
+              busy={
+                Boolean(recallInsight && actBusyKey === recallInsight.key) ||
+                Boolean(activeRecallTask && openingDispatchTaskId === activeRecallTask.id)
+              }
             />
           )}
           {otherUrgentInsights.map((i) => (
@@ -692,6 +736,17 @@ function PriorityActions({
             <Sparkles size={18} />
             <strong>Recommended — savings &amp; improvements</strong>
           </div>
+          {recallInRecommended && (
+            <PriorityRecallCard
+              recalls={recalls}
+              insight={undefined}
+              activeTask={activeRecallTask}
+              onAct={() => undefined}
+              onOpenDispatch={onOpenDispatch}
+              busy={Boolean(activeRecallTask && openingDispatchTaskId === activeRecallTask.id)}
+              shrunk
+            />
+          )}
           {recommendedInsights.map((i) => (
             <PriorityInsightRow
               key={i.key}
@@ -713,29 +768,77 @@ function PriorityActions({
 function PriorityRecallCard({
   recalls,
   insight,
+  activeTask,
   onAct,
-  busy
+  onOpenDispatch,
+  busy,
+  shrunk
 }: {
   recalls: RecallRecord[];
   insight: Insight | undefined;
+  activeTask: Task | null;
   onAct: () => void;
+  onOpenDispatch: (taskId: string) => void;
   busy: boolean;
+  shrunk?: boolean;
 }) {
+  // In-flight = outreach has been sent, waiting on dealer reply.
+  const inFlight =
+    activeTask?.status === "waiting_on_provider" ||
+    activeTask?.status === "in_progress";
+  // Approved-but-not-dispatched = legacy stuck state where someone hit Approve
+  // without going through the modal. We surface a Contact dealers button.
+  const approvedAwaitingDispatch =
+    activeTask?.status === "approved" && !inFlight;
+
   return (
-    <div className="priority-recall-card">
+    <div className={`priority-recall-card ${shrunk ? "shrunk" : ""}`}>
       <div className="priority-recall-head">
         <div>
           <strong>{recalls.length} open recall{recalls.length === 1 ? "" : "s"} on your vehicle</strong>
-          <p className="small muted">
-            Recall repairs are free at any authorized dealer. Tap a row for what's affected.
-          </p>
+          {inFlight ? (
+            <p className="small recall-inflight-note">
+              <Send size={12} /> Outreach sent — waiting for the dealer to reply.{" "}
+              {activeTask && (
+                <button
+                  className="ghost small inline-edit"
+                  type="button"
+                  onClick={() => onOpenDispatch(activeTask.id)}
+                >
+                  view dispatch
+                </button>
+              )}
+            </p>
+          ) : (
+            <p className="small muted">
+              Recall repairs are free at any authorized dealer. Tap a row for what's affected.
+            </p>
+          )}
         </div>
-        {insight && (
+        {/* CTA logic:
+           - inFlight: no CTA, status text replaces it
+           - has insight (no active task or approval-state): "Approve & contact dealers"
+           - approved-but-stuck: "Contact dealers" (recover from legacy stuck state) */}
+        {!inFlight && insight && (
           <button className="primary recall-cta" type="button" onClick={onAct} disabled={busy}>
             {busy ? (
               <><Loader2 size={16} className="spinner" /> Finding dealers…</>
             ) : (
               <>{insight.cta_label} <ChevronRight size={14} /></>
+            )}
+          </button>
+        )}
+        {!inFlight && !insight && approvedAwaitingDispatch && activeTask && (
+          <button
+            className="primary recall-cta"
+            type="button"
+            onClick={() => onOpenDispatch(activeTask.id)}
+            disabled={busy}
+          >
+            {busy ? (
+              <><Loader2 size={16} className="spinner" /> Loading…</>
+            ) : (
+              <><Send size={14} /> Contact dealers</>
             )}
           </button>
         )}

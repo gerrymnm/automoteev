@@ -657,6 +657,27 @@ label.checkbox-row a {
   gap: 10px;
   margin-bottom: 10px;
 }
+/* Shrunk variant for the recommended (yellow) section, when outreach is in flight. */
+.priority-recall-card.shrunk {
+  border-color: #e4d294;
+  padding: 10px 12px;
+}
+.priority-recall-card.shrunk .priority-recall-head strong {
+  color: #6f5a13;
+  font-size: 14px;
+}
+.priority-recall-card.shrunk .recall-item {
+  display: none;
+}
+.recall-inflight-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #1f4a2c;
+  margin: 4px 0 0 0;
+  font-weight: 500;
+}
+.recall-inflight-note svg { color: #1f4a2c; }
 .priority-recall-head {
   display: flex;
   justify-content: space-between;
