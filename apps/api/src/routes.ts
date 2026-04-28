@@ -52,6 +52,14 @@ import { subscribePush, unsubscribePush, sendPushToUser } from "./services/push.
 import { getGasPrice, getMaintenanceCost } from "./services/market.js";
 import { assignAgentEmailLocal, composeAgentAddress } from "./services/alias.js";
 import {
+  listRenewalsForUser,
+  dismissRenewal,
+  defaultLabel,
+  defaultReminderDays,
+  type RenewableKind,
+  type CostPeriod
+} from "./services/renewals.js";
+import {
   getAutonomyState,
   recordApprovedSend,
   isPro
@@ -2091,6 +2099,264 @@ router.get("/api/documents/:id/signed-url", async (req, res) => {
   if (!result) {
     return res.status(500).json({ error: "Could not generate signed URL" });
   }
+  return res.json(result);
+});
+
+// ---------- Renewals (DL, insurance, warranties, memberships, subscriptions) -
+
+const RENEWABLE_KINDS = [
+  "drivers_license",
+  "insurance_policy",
+  "vehicle_registration",
+  "vehicle_warranty_basic",
+  "vehicle_warranty_powertrain",
+  "extended_warranty",
+  "prepaid_maintenance",
+  "gap_insurance",
+  "tire_protection",
+  "roadside_assistance",
+  "aaa_membership",
+  "membership",
+  "subscription",
+  "other"
+] as const;
+
+const COST_PERIODS = ["one_time", "monthly", "annual", "biennial"] as const;
+
+const renewalCreateSchema = z
+  .object({
+    vehicle_id: z.string().uuid().nullable().optional(),
+    kind: z.enum(RENEWABLE_KINDS),
+    label: z.string().min(1).max(120).optional(),
+    provider_name: z.string().min(1).max(120).nullable().optional(),
+    policy_number: z.string().min(1).max(60).nullable().optional(),
+    expires_at: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, "expires_at must be YYYY-MM-DD")
+      .nullable()
+      .optional(),
+    expires_at_mileage: z.number().int().nonnegative().nullable().optional(),
+    auto_renews: z.boolean().optional(),
+    cost_cents: z.number().int().nonnegative().nullable().optional(),
+    cost_period: z.enum(COST_PERIODS).nullable().optional(),
+    reminder_days_before: z.number().int().positive().max(365).optional(),
+    notes: z.string().max(2000).nullable().optional()
+  })
+  .refine(
+    (v) => v.expires_at != null || v.expires_at_mileage != null,
+    "At least one of expires_at or expires_at_mileage is required"
+  );
+
+const renewalUpdateSchema = z.object({
+  vehicle_id: z.string().uuid().nullable().optional(),
+  kind: z.enum(RENEWABLE_KINDS).optional(),
+  label: z.string().min(1).max(120).optional(),
+  provider_name: z.string().min(1).max(120).nullable().optional(),
+  policy_number: z.string().min(1).max(60).nullable().optional(),
+  expires_at: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .nullable()
+    .optional(),
+  expires_at_mileage: z.number().int().nonnegative().nullable().optional(),
+  auto_renews: z.boolean().optional(),
+  cost_cents: z.number().int().nonnegative().nullable().optional(),
+  cost_period: z.enum(COST_PERIODS).nullable().optional(),
+  reminder_days_before: z.number().int().positive().max(365).optional(),
+  notes: z.string().max(2000).nullable().optional()
+});
+
+/**
+ * List the user's renewable items. Includes status decoration (days until
+ * expiration, is_expired, is_due_soon) computed server-side so the client
+ * doesn't need to re-derive on every render.
+ *
+ * Query params:
+ *   ?vehicle_id=<uuid>           Restrict to one vehicle (still includes
+ *                                user-scoped items like DL).
+ *   ?include_dismissed=true      Show snoozed items (default: hide).
+ *   ?include_expired=false       Hide expired items (default: show).
+ */
+router.get("/api/renewals", async (req, res) => {
+  const vehicleId =
+    typeof req.query.vehicle_id === "string" && req.query.vehicle_id.length > 0
+      ? req.query.vehicle_id
+      : null;
+  const includeDismissed = req.query.include_dismissed === "true";
+  const includeExpired = req.query.include_expired !== "false";
+
+  const items = await listRenewalsForUser({
+    userId: req.user!.id,
+    vehicleId,
+    includeDismissed,
+    includeExpired
+  });
+
+  return res.json({ items, total: items.length });
+});
+
+/**
+ * Create a renewable item manually. The DL flow auto-creates via the
+ * documents pipeline; this endpoint is for everything the agent can't
+ * extract: warranties on a printed contract, AAA memberships, prepaid
+ * maintenance plans, gym subscriptions, etc.
+ *
+ * Defaults applied: label falls back to defaultLabel(kind),
+ * reminder_days_before falls back to defaultReminderDays(kind), auto_renews
+ * defaults to false (lapse semantics).
+ */
+router.post("/api/renewals", async (req, res) => {
+  const payload = renewalCreateSchema.parse(req.body);
+  const kind = payload.kind as RenewableKind;
+
+  const insertRow: Record<string, unknown> = {
+    user_id: req.user!.id,
+    vehicle_id: payload.vehicle_id ?? null,
+    kind,
+    label: payload.label ?? defaultLabel(kind),
+    provider_name: payload.provider_name ?? null,
+    expires_at: payload.expires_at ?? null,
+    expires_at_mileage: payload.expires_at_mileage ?? null,
+    auto_renews: payload.auto_renews ?? false,
+    cost_cents: payload.cost_cents ?? null,
+    cost_period: (payload.cost_period as CostPeriod) ?? null,
+    reminder_days_before: payload.reminder_days_before ?? defaultReminderDays(kind),
+    notes: payload.notes ?? null
+  };
+  if (payload.policy_number) {
+    insertRow.policy_number_encrypted = encryptField(payload.policy_number);
+  }
+
+  const { data, error } = await req
+    .db!.from("renewable_items")
+    .insert(insertRow)
+    .select()
+    .single();
+  if (error) return res.status(400).json({ error: error.message });
+
+  await audit({
+    userId: req.user!.id,
+    vehicleId: payload.vehicle_id ?? undefined,
+    eventType: "renewal_created",
+    summary: `Created renewal: ${insertRow.label} (${kind})`
+  });
+
+  return res.status(201).json({ item: data });
+});
+
+/**
+ * Update a renewable item. Used to correct an extracted expiration date,
+ * change the reminder lead-time, attach a cost figure after the fact, etc.
+ * Ownership enforced via req.db RLS — a row owned by another user simply
+ * isn't visible and the update affects 0 rows.
+ */
+router.patch("/api/renewals/:id", async (req, res) => {
+  const id = z.string().uuid().parse(req.params.id);
+  const payload = renewalUpdateSchema.parse(req.body);
+
+  const update: Record<string, unknown> = {};
+  if (payload.vehicle_id !== undefined) update.vehicle_id = payload.vehicle_id;
+  if (payload.kind !== undefined) update.kind = payload.kind;
+  if (payload.label !== undefined) update.label = payload.label;
+  if (payload.provider_name !== undefined) update.provider_name = payload.provider_name;
+  if (payload.expires_at !== undefined) update.expires_at = payload.expires_at;
+  if (payload.expires_at_mileage !== undefined)
+    update.expires_at_mileage = payload.expires_at_mileage;
+  if (payload.auto_renews !== undefined) update.auto_renews = payload.auto_renews;
+  if (payload.cost_cents !== undefined) update.cost_cents = payload.cost_cents;
+  if (payload.cost_period !== undefined) update.cost_period = payload.cost_period;
+  if (payload.reminder_days_before !== undefined)
+    update.reminder_days_before = payload.reminder_days_before;
+  if (payload.notes !== undefined) update.notes = payload.notes;
+  if (payload.policy_number !== undefined) {
+    update.policy_number_encrypted = payload.policy_number
+      ? encryptField(payload.policy_number)
+      : null;
+  }
+
+  if (Object.keys(update).length === 0) {
+    return res.status(400).json({ error: "No fields to update" });
+  }
+
+  const { data, error } = await req
+    .db!.from("renewable_items")
+    .update(update)
+    .eq("id", id)
+    .select()
+    .maybeSingle();
+  if (error) return res.status(400).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: "Not found" });
+
+  await audit({
+    userId: req.user!.id,
+    eventType: "renewal_updated",
+    summary: `Updated renewal ${id}`,
+    metadata: { updated_fields: Object.keys(update) }
+  });
+
+  return res.json({ item: data });
+});
+
+/**
+ * Hard-delete a renewable item. Easy to recreate (manual entry) so a soft-
+ * delete doesn't earn its complexity here. Snooze with /dismiss instead
+ * if the user just wants to hide the item temporarily.
+ */
+router.delete("/api/renewals/:id", async (req, res) => {
+  const id = z.string().uuid().parse(req.params.id);
+
+  const { data: existing } = await req
+    .db!.from("renewable_items")
+    .select("id, label, kind")
+    .eq("id", id)
+    .maybeSingle();
+  if (!existing) return res.status(404).json({ error: "Not found" });
+
+  const { error } = await req.db!.from("renewable_items").delete().eq("id", id);
+  if (error) return res.status(400).json({ error: error.message });
+
+  await audit({
+    userId: req.user!.id,
+    eventType: "renewal_deleted",
+    summary: `Deleted renewal: ${(existing as any).label} (${(existing as any).kind})`
+  });
+
+  return res.json({ deleted: id });
+});
+
+/**
+ * Soft-snooze a renewable item. Hides it from the home stack until
+ * dismissed_until passes. Default snooze is 7 days; the user can pass
+ * snooze_days (1–365) to override.
+ */
+router.post("/api/renewals/:id/dismiss", async (req, res) => {
+  const id = z.string().uuid().parse(req.params.id);
+  const schema = z.object({
+    snooze_days: z.number().int().positive().max(365).optional()
+  });
+  const { snooze_days } = schema.parse(req.body ?? {});
+
+  // Ownership check via the RLS-scoped client first — if the row isn't
+  // visible to this user, return 404 (don't leak existence).
+  const { data: ownership } = await req
+    .db!.from("renewable_items")
+    .select("id")
+    .eq("id", id)
+    .maybeSingle();
+  if (!ownership) return res.status(404).json({ error: "Not found" });
+
+  const result = await dismissRenewal({
+    userId: req.user!.id,
+    itemId: id,
+    ttlDays: snooze_days
+  });
+
+  await audit({
+    userId: req.user!.id,
+    eventType: "renewal_dismissed",
+    summary: `Snoozed renewal ${id} until ${result.dismissed_until}`
+  });
+
   return res.json(result);
 });
 

@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { env } from "../config.js";
 import { supabaseAdmin } from "../supabase.js";
 import { encryptField } from "../security/encryption.js";
+import { upsertRenewalFromDLExtraction } from "./renewals.js";
 
 /**
  * Document upload + AI extraction service.
@@ -366,6 +367,24 @@ export async function applyExtractedDocument(params: {
       await supabaseAdmin
         .from("user_pii")
         .upsert(update, { onConflict: "user_id" });
+    }
+
+    // Auto-create a renewable_items row for the DL expiration. Best-effort:
+    // if extraction didn't pick up a parseable expiration_date, the helper
+    // returns null and we move on — the dl_number being on file is the
+    // primary outcome; the renewal tracker entry is bonus context.
+    if (data.expiration_date) {
+      try {
+        await upsertRenewalFromDLExtraction({
+          userId: params.userId,
+          documentId: params.documentId,
+          expirationDate: data.expiration_date,
+          dlState: data.dl_state
+        });
+        applied.push("dl_renewal_tracking");
+      } catch (err) {
+        console.error("[documents] DL renewal upsert failed (non-fatal)", err);
+      }
     }
   }
 
