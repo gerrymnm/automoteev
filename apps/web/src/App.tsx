@@ -939,6 +939,13 @@ function Product({ session }: { session: Session }) {
         <ThreadModal
           taskId={threadTaskId}
           onClose={() => setThreadTaskId(null)}
+          onContactMore={(taskId) => {
+            // Close thread modal then open dispatch for the same task. The
+            // open call is async and the existing openDispatchForTask handles
+            // the in-flight loading state, so it's safe to fire-and-forget.
+            setThreadTaskId(null);
+            void openDispatchForTask(taskId);
+          }}
         />
       )}
 
@@ -1155,6 +1162,7 @@ function Home({
                 onOpenDispatch={onOpenDispatch}
                 onViewSentEmail={onViewSentEmail}
                 onOpenForm={onOpenForm}
+                onDismissed={onRefresh}
               />
             ))}
           </div>
@@ -1266,7 +1274,8 @@ function NeedsMeCard({
   onActOnInsight,
   onOpenDispatch,
   onViewSentEmail,
-  onOpenForm
+  onOpenForm,
+  onDismissed
 }: {
   action: PendingAction;
   actBusyKey: string | null;
@@ -1276,9 +1285,44 @@ function NeedsMeCard({
   onOpenDispatch: (taskId: string) => void;
   onViewSentEmail: (taskId: string) => void;
   onOpenForm: (formId: FormId) => void;
+  onDismissed: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dismissBusy, setDismissBusy] = useState(false);
+  const [cancelBusy, setCancelBusy] = useState(false);
+
+  async function dismissSynthetic(insightKey: string, vehicleId: string) {
+    setDismissBusy(true);
+    setError(null);
+    try {
+      await api("/api/insights/dismiss", {
+        method: "POST",
+        body: JSON.stringify({ insight_key: insightKey, vehicle_id: vehicleId })
+      });
+      onDismissed();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not dismiss.");
+    } finally {
+      setDismissBusy(false);
+    }
+  }
+
+  async function cancelApprovalTask(taskId: string) {
+    setCancelBusy(true);
+    setError(null);
+    try {
+      await api(`/api/tasks/${taskId}/approval`, {
+        method: "POST",
+        body: JSON.stringify({ approved: false })
+      });
+      onDismissed();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not decline.");
+    } finally {
+      setCancelBusy(false);
+    }
+  }
 
   const isSynthetic = action.synthetic === true;
   const insight = isSynthetic && action.insight_key
@@ -1329,13 +1373,21 @@ function NeedsMeCard({
             className="primary"
             type="button"
             onClick={() => onActOnInsight(insight)}
-            disabled={insightBusy}
+            disabled={insightBusy || dismissBusy}
           >
             {insightBusy ? (
               <><Loader2 size={14} className="spinner" /> Working…</>
             ) : (
               <>{action.cta_label ?? insight.cta_label ?? "Take action"} <ChevronRight size={14} /></>
             )}
+          </button>
+          <button
+            className="ghost"
+            type="button"
+            onClick={() => dismissSynthetic(insight.key, action.vehicle_id)}
+            disabled={insightBusy || dismissBusy}
+          >
+            {dismissBusy ? <Loader2 size={14} className="spinner" /> : "Not now"}
           </button>
         </div>
       </article>
@@ -1381,18 +1433,28 @@ function NeedsMeCard({
           </button>
         ))}
         {(!action.options || action.options.length === 0) && action.task_id && (
-          <button
-            className="primary"
-            type="button"
-            onClick={() => onOpenDispatch(action.task_id!)}
-            disabled={dispatchBusy}
-          >
-            {dispatchBusy ? (
-              <><Loader2 size={14} className="spinner" /> Opening…</>
-            ) : (
-              <>{action.cta_label ?? "Approve & contact providers"} <ChevronRight size={14} /></>
-            )}
-          </button>
+          <>
+            <button
+              className="primary"
+              type="button"
+              onClick={() => onOpenDispatch(action.task_id!)}
+              disabled={dispatchBusy || cancelBusy}
+            >
+              {dispatchBusy ? (
+                <><Loader2 size={14} className="spinner" /> Opening…</>
+              ) : (
+                <>{action.cta_label ?? "Approve & contact providers"} <ChevronRight size={14} /></>
+              )}
+            </button>
+            <button
+              className="ghost"
+              type="button"
+              onClick={() => cancelApprovalTask(action.task_id!)}
+              disabled={dispatchBusy || cancelBusy}
+            >
+              {cancelBusy ? <Loader2 size={14} className="spinner" /> : "Not now"}
+            </button>
+          </>
         )}
       </div>
     </article>
@@ -2988,10 +3050,12 @@ function DispatchModal({
 // merged and sorted server-side.
 function ThreadModal({
   taskId,
-  onClose
+  onClose,
+  onContactMore
 }: {
   taskId: string;
   onClose: () => void;
+  onContactMore: (taskId: string) => void;
 }) {
   const [thread, setThread] = useState<ThreadResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -3035,6 +3099,22 @@ function ThreadModal({
             <X size={18} />
           </button>
         </div>
+
+        {thread?.task &&
+          isDispatchableTaskType(thread.task.task_type) &&
+          ["needs_user_approval", "approved", "in_progress", "waiting_on_provider"].includes(
+            thread.task.status
+          ) && (
+            <div className="thread-modal-cta-row">
+              <button
+                className="primary"
+                type="button"
+                onClick={() => onContactMore(thread.task!.id)}
+              >
+                <Send size={14} /> Contact more dealers
+              </button>
+            </div>
+          )}
 
         {loading && (
           <div className="thin-status">

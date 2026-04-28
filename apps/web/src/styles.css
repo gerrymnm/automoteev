@@ -2024,3 +2024,34 @@ label.checkbox-row a {
 .verified-contact-badge svg {
   flex-shrink: 0;
 }
+
+/* ============================================================
+   THREAD MODAL — contact more dealers CTA row
+   ============================================================ */
+.thread-modal-cta-row {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 0 16px;
+  border-bottom: 1px solid #ececec;
+  margin-bottom: 12px;
+}
+.thread-modal-cta-row .primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ============================================================
+   NEEDS-ME — secondary "Not now" stacks below primary CTA
+   ============================================================ */
+.needs-me-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+  min-width: 140px;
+}
+.needs-me-actions .ghost {
+  font-size: 13px;
+  color: #666;
+}

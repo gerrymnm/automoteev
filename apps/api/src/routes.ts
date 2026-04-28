@@ -973,11 +973,27 @@ router.get("/api/home", async (req, res) => {
     activeTaskTypes: new Set((activeTasksRes.data ?? []).map((t: any) => t.task_type))
   });
 
+  // Filter out insights the user has dismissed ("Not now") within the
+  // active TTL. Real tasks already have a status-based filter elsewhere;
+  // this only affects synthetic recommendation cards that haven't yet
+  // been turned into tasks. Dismissed entries auto-expire at
+  // dismissed_until so cards re-surface after the snooze.
+  const { data: activeDismissals } = await req
+    .db!.from("dismissed_insights")
+    .select("insight_key")
+    .eq("user_id", userId)
+    .eq("vehicle_id", vehicle.id)
+    .gt("dismissed_until", new Date().toISOString());
+  const dismissedKeys = new Set(
+    (activeDismissals ?? []).map((d: any) => d.insight_key)
+  );
+  const visibleInsights = insights.filter((i) => !dismissedKeys.has(i.key));
+
   // Promote ONLY urgent insights to synthetic pending actions — recommended/
   // info-level live in a separate "savings on the table" panel below the
   // home stack. Skip insights that already have an explicit pending action
   // (so we don't double-stack).
-  const syntheticPending = insights
+  const syntheticPending = visibleInsights
     .filter((i) => i.severity === "urgent")
     .map((i) => ({
       task_id: null as string | null,
@@ -1067,7 +1083,7 @@ router.get("/api/home", async (req, res) => {
     pending_actions: allPending,
     agent_working: agentWorking,
     // Recommended/info insights live here — secondary, not on the main stack.
-    secondary_recommendations: insights.filter((i) => i.severity !== "urgent"),
+    secondary_recommendations: visibleInsights.filter((i) => i.severity !== "urgent"),
     summary: {
       vehicle: {
         id: vehicle.id,
@@ -1846,6 +1862,49 @@ router.post("/api/insights/act", async (req, res) => {
   }
 
   return res.status(400).json({ error: "Unsupported action type" });
+});
+
+/**
+ * Dismiss a synthetic insight card on Home for a TTL window. Real tasks
+ * (status = needs_user_approval) decline via /api/tasks/:id/approval with
+ * approved=false; this endpoint is only for insight-driven cards that
+ * don't yet have a task_id.
+ *
+ * Default snooze 7 days — long enough that the user isn't pestered, short
+ * enough that an actually-important recommendation re-surfaces.
+ */
+router.post("/api/insights/dismiss", async (req, res) => {
+  const schema = z.object({
+    insight_key: z.string().min(1),
+    vehicle_id: z.string().uuid(),
+    snooze_days: z.number().int().positive().max(90).optional()
+  });
+  const { insight_key, vehicle_id, snooze_days } = schema.parse(req.body);
+  const ttlDays = snooze_days ?? 7;
+  const dismissedUntil = new Date(Date.now() + ttlDays * 86_400_000).toISOString();
+
+  const { error } = await supabaseAdmin
+    .from("dismissed_insights")
+    .upsert(
+      {
+        user_id: req.user!.id,
+        vehicle_id,
+        insight_key,
+        dismissed_at: new Date().toISOString(),
+        dismissed_until: dismissedUntil
+      },
+      { onConflict: "user_id,vehicle_id,insight_key" }
+    );
+  if (error) return res.status(400).json({ error: error.message });
+
+  await audit({
+    userId: req.user!.id,
+    vehicleId: vehicle_id,
+    eventType: "insight_dismissed",
+    summary: `Dismissed insight: ${insight_key} (snoozed ${ttlDays}d)`
+  });
+
+  return res.json({ ok: true, dismissed_until: dismissedUntil });
 });
 
 // ---------- Documents (image upload + AI extraction) ----------
