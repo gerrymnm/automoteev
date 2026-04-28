@@ -280,6 +280,26 @@ webhooks.post("/webhooks/email/inbound", async (req: Request, res: Response) => 
 
   console.log(`[inbound] stored email for user: ${profile.id} (task=${taskId ?? "unlinked"})`);
 
+  // Thread event: classify and record what just happened, so the timeline
+  // shows both the inbound email AND the agent's reaction. For now this is
+  // a placeholder — the real reply classifier (Claude call) lands in a
+  // follow-up. Today we just log the receipt; that's enough to keep the
+  // timeline complete.
+  if (taskId) {
+    await supabaseAdmin.from("thread_events").insert({
+      user_id: profile.id,
+      task_id: taskId,
+      kind: "agent_classification",
+      summary: `Reply received from ${fromAddress ?? "provider"} — awaiting classifier`,
+      detail: null,
+      metadata: {
+        from: fromAddress,
+        subject: data?.subject ?? null,
+        match_strategy: matchStrategy
+      }
+    });
+  }
+
   // Push notification: this is the moment the user has been waiting for —
   // someone replied. Fire an ambient notification to all their devices so
   // they see it immediately, even with the app closed. Best-effort —

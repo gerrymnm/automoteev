@@ -30,7 +30,7 @@ import {
   dismissPrompt
 } from "./engines/onboarding.js";
 import { decodeVin } from "./services/vin.js";
-import { lookupRecallsByVehicle } from "./services/recalls.js";
+import { lookupRecallsByVehicle, lookupRecallsByVin } from "./services/recalls.js";
 import { sendTaskEmail } from "./services/email.js";
 import { taskEmailBody, taskEmailSubject } from "./services/emailTemplates.js";
 import { createProCheckoutSession } from "./services/stripe.js";
@@ -214,34 +214,17 @@ router.post("/api/onboarding", async (req, res) => {
   // Capture stable values now since req may be GC'd.
   const userId = req.user!.id;
   const vehicleIdForRecall = vehicle.id;
-  const recallMake = decoded.make;
-  const recallModel = decoded.model;
-  const recallYear = decoded.year;
+  const vinForRecall = vehicle.vin;
   void (async () => {
     try {
-      // NHTSA recall API is sometimes case-sensitive on model. Normalize aggressively.
-      const normalizedMake = recallMake?.trim().toUpperCase() ?? null;
-      // Try the model as-is first, then uppercase, then strip extra whitespace.
-      const modelCandidates = [
-        recallModel?.trim() ?? null,
-        recallModel?.trim().toUpperCase() ?? null,
-        recallModel?.replace(/\s+/g, " ").trim() ?? null
-      ].filter((m): m is string => Boolean(m));
-      const uniqueModels = Array.from(new Set(modelCandidates));
-
-      let recall;
-      for (const candidate of uniqueModels) {
-        recall = await lookupRecallsByVehicle({
-          make: normalizedMake,
-          model: candidate,
-          modelYear: recallYear
-        });
-        if (recall.source === "nhtsa") break; // Got a real response, even if 0 campaigns.
-      }
-      if (!recall) return;
+      // VIN-specific lookup: returns ONLY campaigns NHTSA shows as still open
+      // for this specific VIN. Avoids surfacing campaigns that were remedied
+      // at prior service visits, which would otherwise create false-positive
+      // anxiety for the owner.
+      const recall = await lookupRecallsByVin(vinForRecall);
 
       console.log(
-        `[onboarding] recall lookup for ${normalizedMake} ${recallModel} ${recallYear}: ${recall.campaigns.length} campaign(s), source=${recall.source}`
+        `[onboarding] VIN recall lookup for ${vinForRecall}: ${recall.campaigns.length} open campaign(s), source=${recall.source}`
       );
 
       if (recall.campaigns.length) {
@@ -258,10 +241,21 @@ router.post("/api/onboarding", async (req, res) => {
           })),
           { onConflict: "vehicle_id,nhtsa_campaign_id", ignoreDuplicates: true }
         );
+      } else {
+        // No open recalls for this VIN — explicitly clear any stale rows from
+        // a previous (model-year) lookup so the dashboard reflects truth.
+        await supabaseAdmin
+          .from("recalls")
+          .update({ resolved_at: new Date().toISOString() })
+          .eq("vehicle_id", vehicleIdForRecall)
+          .is("resolved_at", null);
       }
       await supabaseAdmin
         .from("vehicles")
-        .update({ recall_status: recall.hasOpenRecall ? "open" : "clear" })
+        .update({
+          recall_status: recall.hasOpenRecall ? "open" : "clear",
+          last_recall_check_at: new Date().toISOString()
+        })
         .eq("id", vehicleIdForRecall);
     } catch (err) {
       console.error("[onboarding] recall lookup failed (non-fatal)", err);
@@ -806,11 +800,9 @@ router.post("/api/recalls/check/:vehicleId", async (req, res) => {
   );
   if (!vehicle) return res.status(404).json({ error: "Vehicle not found" });
 
-  const result = await lookupRecallsByVehicle({
-    make: vehicle.make,
-    model: vehicle.model,
-    modelYear: vehicle.year
-  });
+  // VIN-specific lookup is the ONLY one we surface to users — model-year
+  // lookups produce false positives that create anxiety for no reason.
+  const result = await lookupRecallsByVin(vehicle.vin);
 
   // Dedupe-insert each campaign we don't already have on file.
   if (result.campaigns.length) {
@@ -827,11 +819,21 @@ router.post("/api/recalls/check/:vehicleId", async (req, res) => {
       })),
       { onConflict: "vehicle_id,nhtsa_campaign_id", ignoreDuplicates: true }
     );
+  } else {
+    // No open recalls per NHTSA — mark any prior rows as resolved.
+    await req
+      .db!.from("recalls")
+      .update({ resolved_at: new Date().toISOString() })
+      .eq("vehicle_id", vehicleId)
+      .is("resolved_at", null);
   }
 
   await req
     .db!.from("vehicles")
-    .update({ recall_status: result.hasOpenRecall ? "open" : "clear" })
+    .update({
+      recall_status: result.hasOpenRecall ? "open" : "clear",
+      last_recall_check_at: new Date().toISOString()
+    })
     .eq("id", vehicleId);
 
   const { data: task } = await req
@@ -867,6 +869,314 @@ router.get("/api/recalls/:vehicleId/list", async (req, res) => {
     .order("reported_at", { ascending: false });
   if (error) return res.status(400).json({ error: error.message });
   return res.json({ recalls: data ?? [] });
+});
+
+// ---------- Home (the "Needs me" + "Agent working" + savings shape) ----------
+
+/**
+ * The new home endpoint. Returns exactly the three sections the redesigned
+ * home screen renders, in the shape the UI expects. Keeps the frontend
+ * simple — one fetch, one render, no client-side composition.
+ *
+ * Contract:
+ *   pending_actions: items the user MUST decide on. Each is one card.
+ *   agent_working:   campaigns the agent is autonomously working on. One line each.
+ *   summary:         monthly cost, savings captured, savings still on the table.
+ */
+router.get("/api/home", async (req, res) => {
+  const userId = req.user!.id;
+
+  // Pick the user's primary vehicle (most recently created) to scope the
+  // savings figures. If there are zero vehicles the home is essentially
+  // empty and the frontend redirects to onboarding anyway.
+  const { data: vehicleRow } = await req
+    .db!.from("vehicles")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!vehicleRow) {
+    return res.json({ pending_actions: [], agent_working: [], summary: null });
+  }
+  const vehicle = vehicleRow as any;
+
+  // -------- Pending actions: explicit pending_user_action_kind on tasks --
+  // Plus a few synthetic ones derived from state we don't yet store as
+  // explicit pending actions (e.g. open recalls that were just discovered).
+  const { data: explicitPendingTasks } = await req
+    .db!.from("vehicle_tasks")
+    .select("*")
+    .eq("user_id", userId)
+    .not("pending_user_action_kind", "is", null)
+    .order("pending_user_action_set_at", { ascending: false });
+
+  const pendingActions = (explicitPendingTasks ?? []).map((t: any) => ({
+    task_id: t.id,
+    vehicle_id: t.vehicle_id,
+    kind: t.pending_user_action_kind,
+    title: t.pending_user_action_text ?? t.title,
+    body: t.description ?? null,
+    options: (t.pending_user_action_options as any) ?? null,
+    set_at: t.pending_user_action_set_at,
+    category: t.category ?? null,
+    task_type: t.task_type
+  }));
+
+  // Synthetic pending actions — things that need the user but don't yet have
+  // a real campaign. Most importantly: "approve dispatch" for new urgent
+  // insights like an open recall just discovered. These appear as cards too.
+  const [costProfile, loanLease, insurance, maintRes, recallsRes, providersRes, fuelRes, activeTasksRes] =
+    await Promise.all([
+      one(req.db!.from("vehicle_cost_profiles").select("*").eq("vehicle_id", vehicle.id)),
+      one(req.db!.from("loan_lease_accounts").select("*").eq("vehicle_id", vehicle.id)),
+      one(req.db!.from("insurance_accounts").select("*").eq("vehicle_id", vehicle.id)),
+      req.db!.from("maintenance_items").select("*").eq("vehicle_id", vehicle.id),
+      req.db!.from("recalls").select("*").eq("vehicle_id", vehicle.id).is("resolved_at", null),
+      req.db!.from("providers").select("id").eq("is_preferred", true).limit(1),
+      req
+        .db!.from("fuel_entries")
+        .select("entry_date")
+        .eq("vehicle_id", vehicle.id)
+        .order("entry_date", { ascending: false })
+        .limit(1),
+      req
+        .db!.from("vehicle_tasks")
+        .select("task_type, status")
+        .eq("vehicle_id", vehicle.id)
+        .in("status", ["in_progress", "waiting_on_provider", "approved", "needs_user_approval"])
+    ]);
+
+  const lastShoppedAt = (insurance as any)?.last_shopped_at;
+  const lastFuelEntry = fuelRes.data?.[0]?.entry_date;
+
+  const insights = generateInsights({
+    vehicle,
+    costProfile,
+    loanLease,
+    insurance,
+    maintenanceItems: (maintRes.data ?? []) as any,
+    openRecallCount: (recallsRes.data ?? []).length,
+    preferredServiceShopExists: (providersRes.data ?? []).length > 0,
+    monthsSinceLastFuelEntry: lastFuelEntry
+      ? Math.floor((Date.now() - new Date(lastFuelEntry).getTime()) / (30 * 86_400_000))
+      : null,
+    daysSinceLastInsuranceShop: lastShoppedAt
+      ? Math.floor((Date.now() - new Date(lastShoppedAt).getTime()) / 86_400_000)
+      : null,
+    activeTaskTypes: new Set((activeTasksRes.data ?? []).map((t: any) => t.task_type))
+  });
+
+  // Promote ONLY urgent insights to synthetic pending actions — recommended/
+  // info-level live in a separate "savings on the table" panel below the
+  // home stack. Skip insights that already have an explicit pending action
+  // (so we don't double-stack).
+  const syntheticPending = insights
+    .filter((i) => i.severity === "urgent")
+    .map((i) => ({
+      task_id: null as string | null,
+      vehicle_id: vehicle.id,
+      kind: "decision" as const,
+      title: i.title,
+      body: i.body,
+      options: null,
+      set_at: null,
+      category: i.category,
+      task_type: (i.action as any).task_type ?? null,
+      synthetic: true,
+      insight_key: i.key,
+      cta_label: i.cta_label
+    }));
+
+  const allPending = [...pendingActions, ...syntheticPending];
+
+  // -------- Agent working: tasks with no pending action that the agent is on --
+  const { data: agentWorkingTasks } = await req
+    .db!.from("vehicle_tasks")
+    .select("id, title, task_type, status, agent_status_text, updated_at, created_at")
+    .eq("user_id", userId)
+    .in("status", ["in_progress", "waiting_on_provider", "approved"])
+    .is("pending_user_action_kind", null)
+    .order("created_at", { ascending: false });
+
+  const agentWorking = (agentWorkingTasks ?? []).map((t: any) => ({
+    task_id: t.id,
+    title: t.title,
+    task_type: t.task_type,
+    status: t.status,
+    status_text: t.agent_status_text ?? defaultAgentStatusText(t.task_type, t.status),
+    icon_kind: iconKindForTaskType(t.task_type)
+  }));
+
+  // -------- Summary: monthly cost + savings captured + savings on the table --
+  const monthlyCostCents =
+    (costProfile as any)?.total_monthly_cost_cents ?? null;
+  const savingsOnTheTableUsd = insights
+    .filter((i) => i.severity !== "info")
+    .reduce((sum, i) => sum + (i.estimated_savings_usd_per_year ?? 0), 0);
+
+  // Savings captured: sum of completed tasks that recorded savings. This is
+  // a placeholder until we track real captured savings on task completion.
+  const { data: capturedSavingsRows } = await req
+    .db!.from("vehicle_tasks")
+    .select("metadata")
+    .eq("user_id", userId)
+    .eq("status", "completed");
+  const savingsCapturedUsd = (capturedSavingsRows ?? []).reduce((sum: number, t: any) => {
+    const v = (t.metadata as any)?.captured_savings_usd_per_year;
+    return sum + (typeof v === "number" ? v : 0);
+  }, 0);
+
+  return res.json({
+    pending_actions: allPending,
+    agent_working: agentWorking,
+    // Recommended/info insights live here — secondary, not on the main stack.
+    secondary_recommendations: insights.filter((i) => i.severity !== "urgent"),
+    summary: {
+      vehicle: {
+        id: vehicle.id,
+        year: vehicle.year,
+        make: vehicle.make,
+        model: vehicle.model,
+        vin: vehicle.vin,
+        mileage: vehicle.mileage
+      },
+      monthly_cost_cents: monthlyCostCents,
+      savings_captured_usd_per_year: Math.round(savingsCapturedUsd),
+      savings_on_the_table_usd_per_year: Math.round(savingsOnTheTableUsd)
+    }
+  });
+});
+
+function defaultAgentStatusText(taskType: string, status: string): string {
+  const verb = status === "waiting_on_provider" ? "waiting for reply" : "working";
+  switch (taskType) {
+    case "recall_repair":
+    case "recall_appointment":
+      return `Recall outreach — ${verb}`;
+    case "insurance_quote":
+      return `Insurance shopping — ${verb}`;
+    case "refinance":
+      return `Refinance quotes — ${verb}`;
+    case "sell_vehicle":
+      return `Vehicle sale — ${verb}`;
+    case "service_quote":
+      return `Service quotes — ${verb}`;
+    default:
+      return `${taskType.replaceAll("_", " ")} — ${verb}`;
+  }
+}
+
+function iconKindForTaskType(taskType: string): string {
+  switch (taskType) {
+    case "recall_repair":
+    case "recall_appointment":
+      return "recall";
+    case "insurance_quote":
+      return "insurance";
+    case "refinance":
+    case "payoff_quote":
+      return "lending";
+    case "sell_vehicle":
+      return "sale";
+    case "service_quote":
+      return "service";
+    default:
+      return "general";
+  }
+}
+
+/**
+ * Per-thread timeline. Returns the union of task_emails + thread_events for
+ * a given task, sorted chronologically. This is what powers the campaign
+ * detail view (and replaces the current History expand-row).
+ */
+router.get("/api/threads/:taskId", async (req, res) => {
+  const taskId = z.string().uuid().parse(req.params.taskId);
+  const task = await one(req.db!.from("vehicle_tasks").select("*").eq("id", taskId));
+  if (!task) return res.status(404).json({ error: "Task not found" });
+
+  const [emailsRes, eventsRes] = await Promise.all([
+    req
+      .db!.from("task_emails")
+      .select("*")
+      .eq("task_id", taskId)
+      .order("created_at", { ascending: true }),
+    req
+      .db!.from("thread_events")
+      .select("*")
+      .eq("task_id", taskId)
+      .order("created_at", { ascending: true })
+  ]);
+
+  // Merge into a single timeline. Each item carries its own `kind` so the UI
+  // can render the right icon and layout.
+  const items = [
+    ...(emailsRes.data ?? []).map((e: any) => ({
+      kind: e.direction === "outbound" ? "email_out" : "email_in",
+      at: e.created_at,
+      data: e
+    })),
+    ...(eventsRes.data ?? []).map((ev: any) => ({
+      kind: ev.kind,
+      at: ev.created_at,
+      data: ev
+    }))
+  ].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+
+  return res.json({ task, items });
+});
+
+/**
+ * Answer a pending user action. Clears the pending fields so the campaign
+ * leaves the home screen and writes a thread_event capturing what the user
+ * decided. The actual side-effect (email reply, document approval, signature)
+ * is handled by the specific endpoint the option's `next` field points at —
+ * this endpoint's job is just to record the answer and unblock the timeline.
+ */
+router.post("/api/needs-me/:taskId/answer", async (req, res) => {
+  const taskId = z.string().uuid().parse(req.params.taskId);
+  const schema = z.object({
+    option_id: z.string().min(1),
+    note: z.string().optional().nullable()
+  });
+  const { option_id, note } = schema.parse(req.body ?? {});
+
+  const task = await one(req.db!.from("vehicle_tasks").select("*").eq("id", taskId));
+  if (!task) return res.status(404).json({ error: "Task not found" });
+  if (!(task as any).pending_user_action_kind) {
+    return res.status(409).json({ error: "Task has no pending user action" });
+  }
+
+  // Clear the pending action so the card leaves the home screen.
+  await req
+    .db!.from("vehicle_tasks")
+    .update({
+      pending_user_action_kind: null,
+      pending_user_action_text: null,
+      pending_user_action_options: null,
+      pending_user_action_set_at: null
+    })
+    .eq("id", taskId);
+
+  // Record the user's answer in the thread for posterity.
+  await req.db!.from("thread_events").insert({
+    user_id: req.user!.id,
+    task_id: taskId,
+    kind: "user_decision",
+    summary: `User chose: ${option_id}`,
+    detail: note ?? null,
+    metadata: { option_id, note }
+  });
+
+  await audit({
+    userId: req.user!.id,
+    taskId,
+    vehicleId: (task as any).vehicle_id,
+    eventType: "user_answered_pending",
+    summary: `User chose: ${option_id}`
+  });
+
+  return res.json({ ok: true });
 });
 
 // ---------- Maintenance ----------
@@ -1458,12 +1768,8 @@ router.post("/api/insights/act", async (req, res) => {
   }
 
   if (insight.action.type === "run_recall_check") {
-    // Trigger the same recall lookup as the onboarding background promise.
-    const recall = await lookupRecallsByVehicle({
-      make: vehicle.make?.trim().toUpperCase() ?? null,
-      model: vehicle.model?.trim() ?? null,
-      modelYear: vehicle.year
-    });
+    // Trigger the same VIN-specific recall lookup as the onboarding background promise.
+    const recall = await lookupRecallsByVin(vehicle.vin);
 
     if (recall.campaigns.length) {
       await supabaseAdmin.from("recalls").upsert(
@@ -1479,10 +1785,20 @@ router.post("/api/insights/act", async (req, res) => {
         })),
         { onConflict: "vehicle_id,nhtsa_campaign_id", ignoreDuplicates: true }
       );
+    } else {
+      // No open recalls — clear any stale rows so dashboard reflects truth.
+      await supabaseAdmin
+        .from("recalls")
+        .update({ resolved_at: new Date().toISOString() })
+        .eq("vehicle_id", vehicle_id)
+        .is("resolved_at", null);
     }
     await supabaseAdmin
       .from("vehicles")
-      .update({ recall_status: recall.hasOpenRecall ? "open" : "clear" })
+      .update({
+        recall_status: recall.hasOpenRecall ? "open" : "clear",
+        last_recall_check_at: new Date().toISOString()
+      })
       .eq("id", vehicle_id);
 
     return res.json({

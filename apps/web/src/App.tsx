@@ -31,12 +31,15 @@ import {
 import { api, money, moneyRange, vehicleName } from "./api";
 import { isSupabaseConfigured, supabase } from "./supabase";
 import type {
+  AgentWorkingItem,
   AutonomyStatus,
   Dashboard,
   DispatchPayload,
   DispatchProvider,
+  HomeResponse,
   Insight,
   MaintenanceItem,
+  PendingAction,
   Provider,
   RecallRecord,
   SubscriptionStatus,
@@ -59,7 +62,7 @@ function isDispatchableTaskType(t: string | null | undefined): boolean {
   return Boolean(t && DISPATCHABLE_TASK_TYPES.has(t));
 }
 
-type Tab = "status" | "tasks" | "command" | "history" | "settings";
+type Tab = "home" | "command" | "history" | "settings";
 type FormId = "insurance" | "loan" | "fuel" | "preferred_shop";
 
 // ============================================================
@@ -629,9 +632,10 @@ function AuthenticatedApp() {
 // Product (signed in)
 // ============================================================
 function Product({ session }: { session: Session }) {
-  const [tab, setTab] = useState<Tab>("status");
+  const [tab, setTab] = useState<Tab>("home");
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [home, setHome] = useState<HomeResponse | null>(null);
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -716,12 +720,14 @@ function Product({ session }: { session: Session }) {
       const nextId = selectedId ?? vehicleResponse.vehicles[0]?.id ?? null;
       setSelectedId(nextId);
       if (nextId) {
-        const [dash, taskResponse, providerResponse, autonomyResponse] = await Promise.all([
+        const [homeResp, dash, taskResponse, providerResponse, autonomyResponse] = await Promise.all([
+          api<HomeResponse>("/api/home"),
           api<Dashboard>(`/api/vehicles/${nextId}/dashboard`),
           api<{ tasks: Task[] }>("/api/tasks"),
           api<{ providers: Provider[] }>("/api/providers"),
           api<AutonomyStatus>("/api/autonomy/status")
         ]);
+        setHome(homeResp);
         setDashboard(dash);
         setTasks(taskResponse.tasks);
         setProviders(providerResponse.providers);
@@ -776,7 +782,7 @@ function Product({ session }: { session: Session }) {
         }
       } else if (result.action === "task_created" && result.task) {
         setHighlightTaskId(result.task.id);
-        setTab("tasks");
+        setTab("home");
         await refresh();
       } else if (result.action === "open_form" && result.form_id) {
         setOpenForm(result.form_id as FormId);
@@ -792,8 +798,11 @@ function Product({ session }: { session: Session }) {
 
   useEffect(() => {
     void refresh();
-    // poll dashboard every 30s so background recall lookup / value refresh shows up
+    // poll home + dashboard every 30s so background updates (recall lookups,
+    // value refresh, dealer replies arriving) become visible without a manual
+    // pull-to-refresh.
     const id = setInterval(() => {
+      api<HomeResponse>("/api/home").then(setHome).catch(() => undefined);
       if (selectedId) {
         api<Dashboard>(`/api/vehicles/${selectedId}/dashboard`)
           .then(setDashboard)
@@ -865,7 +874,7 @@ function Product({ session }: { session: Session }) {
         </div>
         <div className="topbar-right">
           <nav className="tabs desktop-only" aria-label="Main">
-            {(["status", "tasks", "command", "history", "settings"] as Tab[]).map((item) => (
+            {(["home", "command", "history", "settings"] as Tab[]).map((item) => (
               <button className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>
                 {item}
               </button>
@@ -903,7 +912,7 @@ function Product({ session }: { session: Session }) {
           onClose={() => setDispatch(null)}
           onSent={async () => {
             setDispatch(null);
-            setTab("tasks");
+            setTab("home");
             await refresh();
           }}
         />
@@ -916,8 +925,9 @@ function Product({ session }: { session: Session }) {
         />
       )}
 
-      {tab === "status" && dashboard && selectedId && (
-        <Status
+      {tab === "home" && dashboard && selectedId && home && (
+        <Home
+          home={home}
           dashboard={dashboard}
           vehicleId={selectedId}
           tasks={tasks}
@@ -927,20 +937,7 @@ function Product({ session }: { session: Session }) {
           onOpenDispatch={openDispatchForTask}
           openingDispatchTaskId={openingDispatchTaskId}
           onViewSentEmail={viewSentEmail}
-        />
-      )}
-      {tab === "tasks" && dashboard && (
-        <TaskCenter
-          dashboard={dashboard}
-          tasks={tasks}
-          providers={providers}
-          autonomy={autonomy}
-          highlightTaskId={highlightTaskId}
-          onActOnInsight={actOnInsight}
-          actBusyKey={actBusyKey}
-          onRefresh={refresh}
-          onOpenDispatch={openDispatchForTask}
-          openingDispatchTaskId={openingDispatchTaskId}
+          onOpenForm={(formId) => setOpenForm(formId)}
         />
       )}
       {tab === "command" && selectedId && <Command vehicleId={selectedId} onCreated={refresh} />}
@@ -949,7 +946,7 @@ function Product({ session }: { session: Session }) {
 
       {/* Mobile bottom nav */}
       <nav className="bottom-nav mobile-only" aria-label="Main">
-        {(["status", "tasks", "command", "history", "settings"] as Tab[]).map((item) => (
+        {(["home", "command", "history", "settings"] as Tab[]).map((item) => (
           <button className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>
             <BottomNavIcon tab={item} />
             <span>{item}</span>
@@ -962,8 +959,7 @@ function Product({ session }: { session: Session }) {
 
 function BottomNavIcon({ tab }: { tab: Tab }) {
   const sz = 18;
-  if (tab === "status") return <CheckCircle2 size={sz} />;
-  if (tab === "tasks") return <Wrench size={sz} />;
+  if (tab === "home") return <CheckCircle2 size={sz} />;
   if (tab === "command") return <Send size={sz} />;
   if (tab === "history") return <Clock3 size={sz} />;
   return <Lock size={sz} />;
@@ -1068,6 +1064,368 @@ function Onboarding({ onDone, email }: { onDone: () => void; email: string }) {
       </button>
     </form>
   );
+}
+
+// ============================================================
+// HOME (the new primary screen — "Needs me" + "Agent working" + savings)
+// ============================================================
+//
+// One pane, three sections, top to bottom:
+//
+//   1. Needs me — a stack of cards, one per pending question. Each card has
+//      explicit options ("Switch", "Keep current", "Get more quotes"). The
+//      moment a card is answered or its task changes state, it leaves the
+//      stack on the next refresh.
+//
+//   2. Agent working — a quiet strip of one-liners describing what the agent
+//      is doing in the background. Tappable to drill into the timeline.
+//
+//   3. Status + savings — a small panel: vehicle name, monthly cost, savings
+//      captured, savings still on the table. Designed to fit on screen below
+//      the actionable parts; never shouts for attention.
+//
+// Anything urgent and current the user needs to address surfaces in (1).
+// Anything in progress without user input needed surfaces in (2). Everything
+// else stays out of the way.
+function Home({
+  home,
+  dashboard,
+  vehicleId,
+  tasks,
+  onRefresh,
+  onActOnInsight,
+  actBusyKey,
+  onOpenDispatch,
+  openingDispatchTaskId,
+  onViewSentEmail,
+  onOpenForm
+}: {
+  home: HomeResponse;
+  dashboard: Dashboard;
+  vehicleId: string;
+  tasks: Task[];
+  onRefresh: () => void;
+  onActOnInsight: (insight: Insight) => void;
+  actBusyKey: string | null;
+  onOpenDispatch: (taskId: string) => void;
+  openingDispatchTaskId: string | null;
+  onViewSentEmail: (taskId: string) => void;
+  onOpenForm: (formId: FormId) => void;
+}) {
+  const v = home.summary?.vehicle ?? null;
+  const monthly = home.summary?.monthly_cost_cents ?? null;
+  const savingsCaptured = home.summary?.savings_captured_usd_per_year ?? 0;
+  const savingsOnTheTable = home.summary?.savings_on_the_table_usd_per_year ?? 0;
+  const pending = home.pending_actions;
+  const working = home.agent_working;
+  const secondary = home.secondary_recommendations;
+
+  return (
+    <section className="home-layout">
+      {/* ---------- Needs me ---------- */}
+      {pending.length > 0 && (
+        <div className="needs-me-section">
+          <h2 className="section-title">Needs you</h2>
+          <div className="needs-me-stack">
+            {pending.map((p, idx) => (
+              <NeedsMeCard
+                key={p.task_id ?? `synthetic-${idx}`}
+                action={p}
+                actBusyKey={actBusyKey}
+                openingDispatchTaskId={openingDispatchTaskId}
+                dashboard={dashboard}
+                onActOnInsight={onActOnInsight}
+                onOpenDispatch={onOpenDispatch}
+                onViewSentEmail={onViewSentEmail}
+                onOpenForm={onOpenForm}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ---------- Agent working ---------- */}
+      {working.length > 0 && (
+        <div className="agent-working-section">
+          <h2 className="section-title section-title-quiet">
+            Agent is working on {working.length} thing{working.length === 1 ? "" : "s"}
+          </h2>
+          <ul className="agent-working-strip">
+            {working.map((w) => (
+              <AgentWorkingRow
+                key={w.task_id}
+                item={w}
+                onTap={() => onViewSentEmail(w.task_id)}
+              />
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* ---------- Empty state ---------- */}
+      {pending.length === 0 && working.length === 0 && (
+        <div className="home-empty">
+          <CheckCircle2 size={36} className="home-empty-icon" />
+          <h2>You're all caught up.</h2>
+          <p className="muted">
+            Automoteev is keeping an eye on your vehicle. We'll surface anything that needs you here.
+          </p>
+        </div>
+      )}
+
+      {/* ---------- Status + savings ---------- */}
+      <div className="status-summary-card">
+        {v && (
+          <div className="status-summary-vehicle">
+            <div>
+              <p className="muted small">Your vehicle</p>
+              <strong>{`${v.year ?? ""} ${v.make ?? ""} ${v.model ?? ""}`.trim() || "Vehicle"}</strong>
+              <p className="muted small">VIN {v.vin} · {v.mileage.toLocaleString()} mi</p>
+            </div>
+          </div>
+        )}
+        <div className="status-summary-metrics">
+          <div className="summary-metric">
+            <span className="summary-metric-label">Monthly cost</span>
+            <strong>{monthly != null ? money(monthly) : "—"}</strong>
+          </div>
+          <div className="summary-metric">
+            <span className="summary-metric-label">Savings captured</span>
+            <strong>{savingsCaptured > 0 ? `~${savingsCaptured.toLocaleString()}/yr` : "—"}</strong>
+          </div>
+          <div className="summary-metric">
+            <span className="summary-metric-label">Savings on the table</span>
+            <strong className={savingsOnTheTable > 0 ? "savings-highlight" : undefined}>
+              {savingsOnTheTable > 0 ? `~${savingsOnTheTable.toLocaleString()}/yr` : "—"}
+            </strong>
+          </div>
+        </div>
+      </div>
+
+      {/* ---------- Secondary improvements (collapsed by default) ---------- */}
+      {secondary.length > 0 && (
+        <details className="secondary-improvements">
+          <summary>
+            <Sparkles size={16} /> Automoteev sees {secondary.length} more potential improvement{secondary.length === 1 ? "" : "s"}
+          </summary>
+          <ul className="improvements-list">
+            {secondary.map((i) => (
+              <li key={i.key}>
+                <button onClick={() => onActOnInsight(i)} disabled={actBusyKey === i.key} className={`imp-item imp-${i.severity}`}>
+                  <span className="imp-title">{i.title}</span>
+                  {i.estimated_savings_usd_per_year ? (
+                    <span className="imp-savings">~${i.estimated_savings_usd_per_year}/yr</span>
+                  ) : null}
+                  {actBusyKey === i.key ? <Loader2 size={14} className="spinner imp-chev" /> : <ChevronRight size={14} className="imp-chev" />}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      {/* ---------- Quick capture: snap-a-photo — always available ---------- */}
+      <DocumentDropZone vehicleId={vehicleId} onComplete={onRefresh} />
+    </section>
+  );
+}
+
+/**
+ * One "Needs me" card. Renders the question, optional body context, and a row
+ * of explicit option buttons. Two flavors:
+ *   - synthetic (insight-driven): tapping the primary CTA dispatches the
+ *     insight's action via onActOnInsight (creates the task, opens dispatch).
+ *   - explicit (real pending_user_action): tapping an option calls
+ *     /api/needs-me/:taskId/answer to record the choice and unblock the thread.
+ *
+ * For dispatch-flavored cards, we also show "see what was sent" / "view thread"
+ * affordances so the user can dig in without leaving the home view.
+ */
+function NeedsMeCard({
+  action,
+  actBusyKey,
+  openingDispatchTaskId,
+  dashboard,
+  onActOnInsight,
+  onOpenDispatch,
+  onViewSentEmail,
+  onOpenForm
+}: {
+  action: PendingAction;
+  actBusyKey: string | null;
+  openingDispatchTaskId: string | null;
+  dashboard: Dashboard;
+  onActOnInsight: (insight: Insight) => void;
+  onOpenDispatch: (taskId: string) => void;
+  onViewSentEmail: (taskId: string) => void;
+  onOpenForm: (formId: FormId) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const isSynthetic = action.synthetic === true;
+  const insight = isSynthetic && action.insight_key
+    ? dashboard.insights.find((i) => i.key === action.insight_key) ?? null
+    : null;
+
+  const insightBusy = insight ? actBusyKey === insight.key : false;
+  const dispatchBusy = action.task_id ? openingDispatchTaskId === action.task_id : false;
+
+  async function answerOption(optionId: string) {
+    if (!action.task_id) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/api/needs-me/${action.task_id}/answer`, {
+        method: "POST",
+        body: JSON.stringify({ option_id: optionId })
+      });
+      // The Home will re-poll within 30s; force an immediate refresh by
+      // navigating up to the parent's onRefresh? We don't have it here — the
+      // poll will pick this up shortly. For instant feedback we could also
+      // optimistically hide via a local flag; keeping it simple for now.
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not submit answer.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Synthetic insight cards — the most common today.
+  if (isSynthetic && insight) {
+    return (
+      <article className="needs-me-card">
+        <div className="needs-me-icon">
+          <AlertTriangle size={18} />
+        </div>
+        <div className="needs-me-body">
+          <h3 className="needs-me-title">{action.title}</h3>
+          {action.body && <p className="small">{action.body}</p>}
+          {insight.estimated_savings_usd_per_year ? (
+            <p className="small savings-hint">
+              ~${insight.estimated_savings_usd_per_year}/yr in potential savings
+            </p>
+          ) : null}
+        </div>
+        <div className="needs-me-actions">
+          <button
+            className="primary"
+            type="button"
+            onClick={() => onActOnInsight(insight)}
+            disabled={insightBusy}
+          >
+            {insightBusy ? (
+              <><Loader2 size={14} className="spinner" /> Working…</>
+            ) : (
+              <>{action.cta_label ?? insight.cta_label ?? "Take action"} <ChevronRight size={14} /></>
+            )}
+          </button>
+        </div>
+      </article>
+    );
+  }
+
+  // Explicit pending action card — has options the user picks from.
+  return (
+    <article className="needs-me-card">
+      <div className="needs-me-icon">
+        {iconForKindAndCategory(action.kind, action.category)}
+      </div>
+      <div className="needs-me-body">
+        <h3 className="needs-me-title">{action.title}</h3>
+        {action.body && <p className="small">{action.body}</p>}
+        {action.task_id && (
+          <button
+            className="ghost small inline-edit"
+            type="button"
+            onClick={() => onViewSentEmail(action.task_id!)}
+          >
+            view conversation
+          </button>
+        )}
+        {error && <div className="error small">{error}</div>}
+      </div>
+      <div className="needs-me-actions">
+        {(action.options ?? []).map((opt) => (
+          <button
+            key={opt.id}
+            className={opt.style ?? "secondary"}
+            type="button"
+            onClick={() => {
+              if (opt.href) {
+                window.open(opt.href, "_blank", "noopener,noreferrer");
+              } else {
+                void answerOption(opt.id);
+              }
+            }}
+            disabled={busy || dispatchBusy}
+          >
+            {busy ? <Loader2 size={14} className="spinner" /> : opt.label}
+          </button>
+        ))}
+        {(!action.options || action.options.length === 0) && action.task_id && (
+          <button
+            className="primary"
+            type="button"
+            onClick={() => onOpenDispatch(action.task_id!)}
+            disabled={dispatchBusy}
+          >
+            {dispatchBusy ? (
+              <><Loader2 size={14} className="spinner" /> Opening…</>
+            ) : (
+              <>Open <ChevronRight size={14} /></>
+            )}
+          </button>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function iconForKindAndCategory(kind: string, category: string | null) {
+  if (kind === "signature") return <FileImage size={18} />;
+  if (kind === "info_request") return <Camera size={18} />;
+  if (kind === "review_quotes") return <DollarSign size={18} />;
+  if (kind === "confirm_close") return <CheckCircle2 size={18} />;
+  if (category === "insurance" || category === "lending") return <DollarSign size={18} />;
+  return <AlertTriangle size={18} />;
+}
+
+/**
+ * One row in the Agent Working strip. Quiet by design — status text in
+ * plain English, small icon, tappable to drill into the campaign timeline.
+ */
+function AgentWorkingRow({ item, onTap }: { item: AgentWorkingItem; onTap: () => void }) {
+  return (
+    <li className="agent-working-row">
+      <button className="agent-working-button" type="button" onClick={onTap}>
+        <span className="agent-working-icon">
+          {iconForAgentItem(item.icon_kind)}
+        </span>
+        <span className="agent-working-text">
+          <strong className="small">{item.title}</strong>
+          <span className="small muted">{item.status_text}</span>
+        </span>
+        <ChevronRight size={14} className="agent-working-chev" />
+      </button>
+    </li>
+  );
+}
+
+function iconForAgentItem(kind: string) {
+  switch (kind) {
+    case "recall":
+      return <AlertTriangle size={16} />;
+    case "insurance":
+    case "lending":
+      return <DollarSign size={16} />;
+    case "sale":
+      return <TrendingUp size={16} />;
+    case "service":
+      return <Wrench size={16} />;
+    default:
+      return <Sparkles size={16} />;
+  }
 }
 
 // ============================================================

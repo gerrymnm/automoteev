@@ -261,3 +261,116 @@ export interface OnboardingPrompt {
   completed: boolean;
   dismissed: boolean;
 }
+
+// ============================================================================
+// Home (the redesigned landing screen)
+// ============================================================================
+
+export type PendingActionKind =
+  | "decision"
+  | "signature"
+  | "info_request"
+  | "confirm_close"
+  | "review_quotes"
+  | "manual";
+
+export interface PendingActionOption {
+  id: string;
+  label: string;
+  style?: "primary" | "secondary" | "ghost" | "danger";
+  /** Optional href for option-style links (e.g. "View PDF"). */
+  href?: string;
+}
+
+export interface PendingAction {
+  task_id: string | null;
+  vehicle_id: string;
+  kind: PendingActionKind;
+  title: string;
+  body: string | null;
+  options: PendingActionOption[] | null;
+  set_at: string | null;
+  category: string | null;
+  task_type: string | null;
+  /** True if this card was synthesized from an insight (no real task yet). */
+  synthetic?: boolean;
+  insight_key?: string;
+  cta_label?: string;
+}
+
+export interface AgentWorkingItem {
+  task_id: string;
+  title: string;
+  task_type: string;
+  status: TaskStatus;
+  status_text: string;
+  icon_kind: string;
+}
+
+export interface HomeSummary {
+  vehicle: {
+    id: string;
+    year: number | null;
+    make: string | null;
+    model: string | null;
+    vin: string;
+    mileage: number;
+  };
+  monthly_cost_cents: number | null;
+  savings_captured_usd_per_year: number;
+  savings_on_the_table_usd_per_year: number;
+}
+
+export interface HomeResponse {
+  pending_actions: PendingAction[];
+  agent_working: AgentWorkingItem[];
+  secondary_recommendations: Insight[];
+  summary: HomeSummary | null;
+}
+
+// ============================================================================
+// Per-thread timeline
+// ============================================================================
+
+export type ThreadItemKind =
+  | "email_out"
+  | "email_in"
+  | "agent_classification"
+  | "agent_decision"
+  | "agent_action"
+  | "state_transition"
+  | "document_attached"
+  | "user_decision"
+  | "user_note"
+  | "system";
+
+export interface ThreadEmailData {
+  id: string;
+  direction: "outbound" | "inbound";
+  to_email: string;
+  from_email: string;
+  subject: string;
+  body_text: string;
+  status: string;
+  created_at: string;
+}
+
+export interface ThreadEventData {
+  id: string;
+  kind: string;
+  summary: string;
+  detail: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface ThreadItem {
+  kind: ThreadItemKind;
+  at: string;
+  data: ThreadEmailData | ThreadEventData;
+}
+
+export interface ThreadResponse {
+  task: Task;
+  items: ThreadItem[];
+}
