@@ -1,6 +1,7 @@
 import { supabaseAdmin } from "../supabase.js";
 import { sendPushToUser } from "./push.js";
 import { listRenewalsForUser, type RenewableItemWithStatus } from "./renewals.js";
+import { dmvForState } from "./state-dmv.js";
 
 /**
  * Renewals insights + reminder service.
@@ -65,14 +66,18 @@ export type RenewalCtaAction =
 /**
  * Build the home card for a single due-soon or expired renewable item.
  * Pure function — caller passes already-decorated items from
- * listRenewalsForUser().
+ * listRenewalsForUser() plus the user's `dl_state` (looked up once at
+ * the call site so we don't N+1 across items).
  *
  * Title formatting balances brevity (it goes in the "Needs You" stack
  * alongside other cards) with enough context to act without drilling
  * in. For an item that's already expired we lead with "EXPIRED" so the
  * user can't miss it.
  */
-function cardFromRenewal(item: RenewableItemWithStatus): RenewalCard {
+function cardFromRenewal(
+  item: RenewableItemWithStatus,
+  userState: string | null
+): RenewalCard {
   const days = item.days_until_expiration;
   const isExpired = item.is_expired;
 
@@ -87,10 +92,15 @@ function cardFromRenewal(item: RenewableItemWithStatus): RenewalCard {
 
   const provider = item.provider_name ? ` (${item.provider_name})` : "";
 
+  // Resolve the user's state DMV once — used by both DL and registration
+  // branches below. Falls back to the usa.gov agency finder when the user
+  // doesn't have a dl_state on file.
+  const dmv = dmvForState(userState);
+
   // CTA depends on the kind. Insurance gets the dispatch shortcut since we
-  // have a full shop-replacement pipeline. DL/registration go to a state
-  // DMV redirect (legally we can't transact for them). Everything else
-  // opens the edit form so the user can update the date or move it
+  // have a full shop-replacement pipeline. DL/registration go to the right
+  // state DMV redirect (legally we can't transact for them). Everything
+  // else opens the edit form so the user can update the date or move it
   // elsewhere if it's already been renewed.
   let ctaLabel: string;
   let ctaAction: RenewalCtaAction;
@@ -100,22 +110,25 @@ function cardFromRenewal(item: RenewableItemWithStatus): RenewalCard {
       ctaAction = { type: "shop_replacement", task_type: "insurance_quote" };
       break;
     case "drivers_license":
-      ctaLabel = "Open DMV";
+      // Label is "Open <agency_name>" so a Pennsylvania user sees "Open
+      // PennDOT" not "Open DMV". When state is unknown the agency_name
+      // falls back to a neutral "your state DMV" phrase.
+      ctaLabel = `Open ${dmv.agency_name}`;
       ctaAction = {
         type: "open_external",
-        // California by default. We have dl_state in user_pii for the
-        // proper redirect later; for now CA is the only supported state
-        // and >95% of our test traffic.
-        url: "https://www.dmv.ca.gov/portal/driver-licenses-identification-cards/renew-driver-license-rdl/",
-        label: "DMV.ca.gov"
+        url: dmv.dl_renewal_url,
+        label: dmv.agency_name
       };
       break;
     case "vehicle_registration":
+      // Most users register their vehicle in the same state where their DL
+      // is issued. dl_state is the best signal we have today; if we ever
+      // add a per-vehicle registration_state column we can prefer that.
       ctaLabel = "Renew registration";
       ctaAction = {
         type: "open_external",
-        url: "https://www.dmv.ca.gov/portal/vehicle-registration/registration-renewal/",
-        label: "DMV.ca.gov"
+        url: dmv.registration_renewal_url,
+        label: dmv.agency_name
       };
       break;
     default:
@@ -167,15 +180,36 @@ function cardFromRenewal(item: RenewableItemWithStatus): RenewalCard {
 export async function getRenewalCardsForHome(
   userId: string
 ): Promise<RenewalCard[]> {
-  const items = await listRenewalsForUser({
-    userId,
-    includeDismissed: false,
-    includeExpired: true
-  });
+  const [items, userState] = await Promise.all([
+    listRenewalsForUser({
+      userId,
+      includeDismissed: false,
+      includeExpired: true
+    }),
+    // Single lookup of dl_state so DL and registration cards both get the
+    // right state DMV deep-link without an N+1 against user_pii. If the
+    // user hasn't provided a DL yet, dl_state is null and the cards fall
+    // back to the usa.gov state finder.
+    getDlStateForUser(userId)
+  ]);
 
   return items
     .filter((i) => i.is_due_soon || i.is_expired)
-    .map(cardFromRenewal);
+    .map((item) => cardFromRenewal(item, userState));
+}
+
+/**
+ * Read the user's `dl_state` from user_pii. Returns null when not set or
+ * on any error — callers fall back to the default DMV redirect rather than
+ * blocking the home render on a single PII lookup.
+ */
+async function getDlStateForUser(userId: string): Promise<string | null> {
+  const { data } = await supabaseAdmin
+    .from("user_pii")
+    .select("dl_state")
+    .eq("user_id", userId)
+    .maybeSingle();
+  return (data as any)?.dl_state ?? null;
 }
 
 /**
