@@ -2003,3 +2003,24 @@ label.checkbox-row a {
 .no-email-expander .dealer-row {
   margin: 6px 8px;
 }
+
+/* ============================================================
+   DISPATCH MODAL — community-verified contact badge
+   ============================================================ */
+.verified-contact-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #e7f6ec;
+  color: #1f7a3a;
+  border: 1px solid #b7e1c1;
+  font-size: 11px;
+  font-weight: 500;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+.verified-contact-badge svg {
+  flex-shrink: 0;
+}

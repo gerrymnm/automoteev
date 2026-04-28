@@ -59,15 +59,24 @@ export function taskTypeToContactDept(taskType: string | null | undefined): Cont
 /**
  * Pick the address we should email for this (provider, dept) combo.
  * `contacts` is the JSONB column off the providers row. `fallbackEmail` is
- * `providers.email`. Returns null if neither is available.
+ * `providers.email`. `communityEmail` is the freshest community-verified
+ * contact at the same business+dept (from business_contacts), if any.
+ * Returns null if none is available.
+ *
+ * Priority:
+ *   1. Per-user learned contact   (this user has already heard from this rep)
+ *   2. Community-verified contact (some other user heard from a rep here)
+ *   3. Published fallback email   (scraped from the dealer's website)
  */
 export function pickProviderEmailForDept(
   contacts: Record<string, string> | null | undefined,
   fallbackEmail: string | null | undefined,
-  dept: ContactDept
+  dept: ContactDept,
+  communityEmail?: string | null
 ): string | null {
   const learned = contacts?.[dept];
   if (typeof learned === "string" && learned.includes("@")) return learned;
+  if (typeof communityEmail === "string" && communityEmail.includes("@")) return communityEmail;
   if (typeof fallbackEmail === "string" && fallbackEmail.includes("@")) return fallbackEmail;
   return null;
 }

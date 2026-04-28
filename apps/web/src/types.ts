@@ -131,6 +131,9 @@ export interface DispatchProvider extends Provider {
   is_current_provider?: boolean;
   /** Human-readable explanation paired with is_current_provider. */
   current_provider_note?: string | null;
+  verified_by_community?: boolean;
+  community_contact_email?: string | null;
+  community_success_count?: number | null;
 }
 
 export interface DispatchPayload {

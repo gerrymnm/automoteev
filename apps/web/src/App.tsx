@@ -2754,6 +2754,18 @@ function DispatchModal({
                 Your current provider
               </span>
             )}
+            {p.verified_by_community && !p.is_current_provider && (
+              <span
+                className="verified-contact-badge"
+                title={
+                  p.community_success_count && p.community_success_count > 1
+                    ? `Verified contact — ${p.community_success_count} other Automoteev users have heard back from this address`
+                    : "Verified contact — another Automoteev user heard back from this address"
+                }
+              >
+                <CheckCircle2 size={11} /> Verified contact
+              </span>
+            )}
             {p.distance_miles != null && (
               <span className="dealer-distance" title="Distance from your ZIP">
                 <MapPin size={12} /> {formatDistance(p.distance_miles)}

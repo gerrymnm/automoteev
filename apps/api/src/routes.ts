@@ -37,6 +37,12 @@ import { createProCheckoutSession } from "./services/stripe.js";
 import { searchProviders } from "./services/places.js";
 import { discoverProvidersForTask, isDispatchable, type DispatchableTaskType } from "./services/dealer-discovery.js";
 import { detectCurrentProviders } from "./services/current-provider.js";
+import {
+  upsertBusiness,
+  lookupSharedContact,
+  lookupSharedContactsBulk,
+  type SharedContact
+} from "./services/business-directory.js";
 import { pickProviderEmailForDept, taskTypeToContactDept } from "./services/contacts.js";
 import { subscribePush, unsubscribePush, sendPushToUser } from "./services/push.js";
 import { getGasPrice, getMaintenanceCost } from "./services/market.js";
@@ -2166,8 +2172,40 @@ async function buildDispatchPayload(
   // Upsert each discovered provider so it has an id we can dispatch to.
   // Dedupe key varies by task type — see comment above.
   const dept = taskTypeToContactDept(taskType);
-  const inserted: any[] = [];
+
+  // Pass 1: ensure each discovered candidate has both a businesses row
+  // (shared directory) and a per-user providers row linked via business_id.
+  // We hold the rows here and resolve the effective email in pass 2 once
+  // we've bulk-fetched community contacts.
+  type StagedProvider = {
+    row: any;
+    business_id: string | null;
+    derived_email_basis: string | null;
+    rating: number | null;
+    rating_count: number | null;
+    website: string | null;
+    distance_miles: number | null;
+  };
+  const stage1: StagedProvider[] = [];
+
   for (const d of dedupedDiscovered) {
+    // Upsert into shared directory FIRST so future users get the seed.
+    const business = await upsertBusiness({
+      place_id: d.external_id,
+      name: d.name,
+      address: d.location ?? null,
+      phone: d.phone ?? null,
+      website: d.website ?? null,
+      latitude: d.lat ?? null,
+      longitude: d.lng ?? null,
+      provider_type: d.provider_type ?? null,
+      published_email: d.derived_email ?? null,
+      rating: d.rating ?? null,
+      rating_count: d.rating_count ?? null
+    });
+    const businessId = business?.id ?? null;
+    const placeId = d.external_id ?? null;
+
     let lookup = supabaseAdmin
       .from("providers")
       .select("*")
@@ -2179,26 +2217,18 @@ async function buildDispatchPayload(
     const { data: existing } = await lookup.maybeSingle();
 
     if (existing) {
-      // Refresh published email if we now have a verified one and the row didn't.
-      // The 'contacts[dept]' learned address is preferred at send time.
-      if (!existing.email && d.derived_email) {
-        await supabaseAdmin
-          .from("providers")
-          .update({ email: d.derived_email })
-          .eq("id", existing.id);
-        existing.email = d.derived_email;
+      const updates: Record<string, unknown> = {};
+      if (!existing.email && d.derived_email) updates.email = d.derived_email;
+      if (!existing.business_id && businessId) updates.business_id = businessId;
+      if (!existing.place_id && placeId) updates.place_id = placeId;
+      if (Object.keys(updates).length > 0) {
+        await supabaseAdmin.from("providers").update(updates).eq("id", existing.id);
+        Object.assign(existing, updates);
       }
-      // Resolved email = learned dept contact, else published email
-      const resolved = pickProviderEmailForDept(
-        existing.contacts as Record<string, string>,
-        existing.email,
-        dept
-      );
-      inserted.push({
-        ...existing,
-        // Display the address we'd actually send to in the modal
-        email: resolved,
-        derived_email_basis: resolved ? "verified" : "none",
+      stage1.push({
+        row: existing,
+        business_id: businessId ?? existing.business_id ?? null,
+        derived_email_basis: existing.email ? "verified" : null,
         rating: d.rating,
         rating_count: d.rating_count,
         website: d.website,
@@ -2214,19 +2244,16 @@ async function buildDispatchPayload(
           phone: d.phone,
           provider_type: d.provider_type,
           location: d.location,
-          is_preferred: false
+          is_preferred: false,
+          business_id: businessId,
+          place_id: placeId
         })
         .select()
         .single();
       if (created) {
-        const resolved = pickProviderEmailForDept(
-          created.contacts as Record<string, string>,
-          created.email,
-          dept
-        );
-        inserted.push({
-          ...created,
-          email: resolved,
+        stage1.push({
+          row: created,
+          business_id: businessId,
           derived_email_basis: d.derived_email_basis,
           rating: d.rating,
           rating_count: d.rating_count,
@@ -2237,15 +2264,69 @@ async function buildDispatchPayload(
     }
   }
 
+  // Pass 2: bulk-lookup community-verified contacts for every business
+  // touched. Single query. Then resolve each row's effective email using
+  // the new 4-layer priority and annotate verified_by_community.
+  const businessIds = stage1
+    .map((s) => s.business_id)
+    .filter((id): id is string => Boolean(id));
+  const sharedMap = await lookupSharedContactsBulk({
+    business_ids: businessIds,
+    dept
+  });
+
+  const inserted: any[] = stage1.map((s) => {
+    const community = s.business_id ? sharedMap.get(s.business_id) : undefined;
+    const communityEmail = community?.email ?? null;
+    const perUserContact =
+      (s.row.contacts as Record<string, string> | null | undefined)?.[dept] ??
+      null;
+    const resolved = pickProviderEmailForDept(
+      s.row.contacts as Record<string, string>,
+      s.row.email,
+      dept,
+      communityEmail
+    );
+
+    // Verified by community = the row's effective email comes from the
+    // shared pool (this user has no per-user contact for this dept AND
+    // the resolver picked the community address). Drives the green
+    // "Verified contact" badge in the dispatch modal.
+    const verified_by_community =
+      Boolean(community) && !perUserContact && resolved === communityEmail;
+
+    return {
+      ...s.row,
+      email: resolved,
+      derived_email_basis: resolved ? "verified" : "none",
+      rating: s.rating,
+      rating_count: s.rating_count,
+      website: s.website,
+      distance_miles: s.distance_miles,
+      verified_by_community,
+      community_contact_email: communityEmail,
+      community_success_count: community?.success_count ?? null
+    };
+  });
+
   // If user has a preferred provider that's compatible with this task and not
   // already in the discovered list, prepend it.
   let providers = inserted;
   if (compatiblePreferred && !providers.find((p) => p.id === (compatiblePreferred as any).id)) {
     const pref = compatiblePreferred as any;
+    // Look up community contact for the preferred provider's business too.
+    const prefCommunity = pref.business_id
+      ? await lookupSharedContact({ business_id: pref.business_id, dept })
+      : null;
+    const prefCommunityEmail = prefCommunity?.email ?? null;
+    const perUserPref =
+      (pref.contacts as Record<string, string> | null | undefined)?.[dept] ??
+      null;
     const resolved = pickProviderEmailForDept(
       pref.contacts as Record<string, string>,
       pref.email,
-      dept
+      dept,
+      prefCommunityEmail
     );
     providers = [
       {
@@ -2255,7 +2336,11 @@ async function buildDispatchPayload(
         rating: null,
         rating_count: null,
         website: null,
-        distance_miles: null
+        distance_miles: null,
+        verified_by_community:
+          Boolean(prefCommunity) && !perUserPref && resolved === prefCommunityEmail,
+        community_contact_email: prefCommunityEmail,
+        community_success_count: prefCommunity?.success_count ?? null
       },
       ...providers
     ];
@@ -2416,11 +2501,20 @@ router.post("/api/tasks/:id/dispatch", async (req, res) => {
   // Then resolve each provider's effective send-to address: learned dept contact > published.
   const taskTypeForDept = (task as any).task_type as string;
   const dispatchDept = taskTypeToContactDept(taskTypeForDept);
+
+  // Bulk-lookup community contacts for every provider's business so the
+  // shared-pool address is available alongside published / per-user.
+  const dispatchBusinessIds = providerRows
+    .map((p) => p.business_id as string | null)
+    .filter((id): id is string => Boolean(id));
+  const dispatchSharedMap = await lookupSharedContactsBulk({
+    business_ids: dispatchBusinessIds,
+    dept: dispatchDept
+  });
+
   for (const p of providerRows) {
     const override = overrides?.[p.id]?.email;
     if (override && override !== p.email) {
-      // Treat the manual override as a learned dept contact — saves writing the
-      // same email twice when the user fixes a wrong address in the modal.
       const updatedContacts = {
         ...((p.contacts ?? {}) as Record<string, string>),
         [dispatchDept]: override
@@ -2428,10 +2522,12 @@ router.post("/api/tasks/:id/dispatch", async (req, res) => {
       await req.db!.from("providers").update({ contacts: updatedContacts }).eq("id", p.id);
       p.contacts = updatedContacts;
     }
+    const community = p.business_id ? dispatchSharedMap.get(p.business_id) : undefined;
     p._send_to = pickProviderEmailForDept(
       p.contacts as Record<string, string>,
       p.email,
-      dispatchDept
+      dispatchDept,
+      community?.email ?? null
     );
   }
 

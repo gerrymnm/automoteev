@@ -5,6 +5,7 @@ import { env } from "./config.js";
 import { supabaseAdmin } from "./supabase.js";
 import { stripe, verifyStripeWebhook } from "./services/stripe.js";
 import { taskTypeToContactDept, shouldLearnContact } from "./services/contacts.js";
+import { recordVerifiedContact } from "./services/business-directory.js";
 import { sendPushToUser } from "./services/push.js";
 import { classifyReply } from "./services/reply-classifier.js";
 import { uploadDocument, extractDocument, type DocumentKind } from "./services/documents.js";
@@ -247,6 +248,16 @@ webhooks.post("/webhooks/email/inbound", async (req: Request, res: Response) => 
           console.log(
             `[inbound] learned ${dept} contact for provider ${providerId}: ${originalToEmail} → ${newAddr}`
           );
+
+          if ((providerRow as any).business_id) {
+            await recordVerifiedContact({
+              business_id: (providerRow as any).business_id,
+              email: newAddr,
+              dept,
+              contact_name: null,
+              user_id: (providerRow as any).user_id
+            });
+          }
         }
       }
     } catch (err) {
