@@ -26,11 +26,48 @@ export type DocumentKind =
   | "sale_paperwork"
   | "other";
 
+export type DocumentCategory =
+  | "insurance"
+  | "loan"
+  | "registration"
+  | "recall"
+  | "service"
+  | "sale"
+  | "other";
+
+/**
+ * Map a document_kind to its user-facing category folder. The category is
+ * what the user sees when drilling into a vehicle's documents ("Insurance",
+ * "Loan", etc.). Stored explicitly on the row so future re-categorization
+ * doesn't require re-deriving from kind.
+ */
+export function documentKindToCategory(kind: DocumentKind): DocumentCategory {
+  switch (kind) {
+    case "insurance_dec_page":
+      return "insurance";
+    case "loan_statement":
+    case "lease_agreement":
+      return "loan";
+    case "registration":
+      return "registration";
+    case "recall_notice":
+      return "recall";
+    case "service_record":
+      return "service";
+    case "sale_paperwork":
+      return "sale";
+    case "other":
+    default:
+      return "other";
+  }
+}
+
 export interface UploadedDocument {
   id: string;
   user_id: string;
   vehicle_id: string | null;
   document_kind: DocumentKind;
+  category: DocumentCategory | null;
   storage_path: string;
   file_name: string;
   mime_type: string;
@@ -59,7 +96,16 @@ export async function uploadDocument(params: {
 }): Promise<UploadedDocument> {
   const ext = params.fileName.split(".").pop()?.toLowerCase() || "bin";
   const docId = crypto.randomUUID();
-  const storagePath = `${params.userId}/${docId}.${ext}`;
+  const category = documentKindToCategory(params.documentKind);
+
+  // Per-VIN folder layout: when a vehicle context is provided, group under
+  // vehicles/<vehicle_id>/<category>/. Otherwise fall back to a per-user
+  // folder so an orphan upload (rare — e.g. a registration photographed
+  // before vehicle setup completes) still has a sensible storage prefix.
+  // The bucket itself is the same; only the prefix changes.
+  const storagePath = params.vehicleId
+    ? `vehicles/${params.vehicleId}/${category}/${docId}.${ext}`
+    : `users/${params.userId}/${category}/${docId}.${ext}`;
 
   // 1. Upload to Storage
   const { error: uploadErr } = await supabaseAdmin.storage
@@ -70,7 +116,9 @@ export async function uploadDocument(params: {
     });
   if (uploadErr) throw new Error(`storage upload failed: ${uploadErr.message}`);
 
-  // 2. Insert metadata row
+  // 2. Insert metadata row — category persisted alongside document_kind so
+  //    future re-categorization can change the user-facing folder without
+  //    losing the original kind that drove the AI extraction prompt.
   const { data: row, error: insertErr } = await supabaseAdmin
     .from("uploaded_documents")
     .insert({
@@ -78,6 +126,7 @@ export async function uploadDocument(params: {
       user_id: params.userId,
       vehicle_id: params.vehicleId,
       document_kind: params.documentKind,
+      category,
       storage_path: storagePath,
       file_name: params.fileName,
       mime_type: params.mimeType,

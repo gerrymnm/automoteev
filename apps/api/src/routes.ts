@@ -1995,6 +1995,76 @@ router.post("/api/documents/:id/apply", async (req, res) => {
   return res.json(result);
 });
 
+/**
+ * List uploaded documents for a vehicle, grouped by category. Powers the
+ * "everything I have on this car" view: registration, insurance dec pages,
+ * loan statements, recall notices, service records, sale paperwork.
+ *
+ * Optional ?category=<name> filters the result set to one folder. With no
+ * filter, returns ALL documents on the vehicle plus a `by_category` map
+ * for grouped rendering.
+ */
+router.get("/api/vehicles/:vehicleId/documents", async (req, res) => {
+  const vehicleId = z.string().uuid().parse(req.params.vehicleId);
+  const categoryParam =
+    typeof req.query.category === "string" ? req.query.category : null;
+  const validCategories = [
+    "insurance",
+    "loan",
+    "registration",
+    "recall",
+    "service",
+    "sale",
+    "other"
+  ] as const;
+  const category =
+    categoryParam && (validCategories as readonly string[]).includes(categoryParam)
+      ? categoryParam
+      : null;
+
+  let query = req
+    .db!.from("uploaded_documents")
+    .select("*")
+    .eq("vehicle_id", vehicleId)
+    .order("uploaded_at", { ascending: false });
+
+  if (category) {
+    query = query.eq("category", category);
+  }
+
+  const { data, error } = await query;
+  if (error) return res.status(400).json({ error: error.message });
+
+  const documents = (data ?? []) as any[];
+
+  // Group for the "folders" UI — only computed when no category filter is
+  // applied (callers asking for one specific folder don't need the map).
+  const by_category: Record<string, any[]> = {};
+  const counts: Record<string, number> = {};
+  if (!category) {
+    for (const cat of validCategories) {
+      by_category[cat] = [];
+      counts[cat] = 0;
+    }
+    for (const doc of documents) {
+      const cat = (doc.category as string) || "other";
+      if (!by_category[cat]) {
+        by_category[cat] = [];
+        counts[cat] = 0;
+      }
+      by_category[cat].push(doc);
+      counts[cat] = (counts[cat] ?? 0) + 1;
+    }
+  }
+
+  return res.json({
+    documents,
+    by_category: category ? null : by_category,
+    counts: category ? null : counts,
+    total: documents.length
+  });
+});
+
 // ---------- MCP token issuance (used from web app to generate a paste-able token) ----------
 
 router.post("/api/mcp/tokens", async (req, res) => {

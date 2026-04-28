@@ -230,6 +230,15 @@ export interface SubscriptionStatus {
   } | null;
 }
 
+export type DocumentCategory =
+  | "insurance"
+  | "loan"
+  | "registration"
+  | "recall"
+  | "service"
+  | "sale"
+  | "other";
+
 export interface UploadedDocument {
   id: string;
   user_id: string;
@@ -243,6 +252,8 @@ export interface UploadedDocument {
     | "service_record"
     | "sale_paperwork"
     | "other";
+  category: DocumentCategory | null;
+  storage_path?: string;
   file_name: string;
   mime_type: string;
   byte_size: number;
@@ -251,6 +262,13 @@ export interface UploadedDocument {
   extraction_error: string | null;
   uploaded_at: string;
   extracted_at: string | null;
+}
+
+export interface VehicleDocumentsResponse {
+  documents: UploadedDocument[];
+  by_category: Record<DocumentCategory, UploadedDocument[]> | null;
+  counts: Record<DocumentCategory, number> | null;
+  total: number;
 }
 
 export interface MCPConnection {

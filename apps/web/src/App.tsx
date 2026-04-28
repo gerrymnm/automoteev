@@ -1144,6 +1144,11 @@ function Home({
   const working = home.agent_working;
   const secondary = home.secondary_recommendations;
 
+  // Bumped whenever a document upload completes so the VehicleDocumentsPanel
+  // re-fetches and shows the freshly-uploaded file. Keeps documents in sync
+  // without forcing a full home re-mount.
+  const [docsRefreshKey, setDocsRefreshKey] = useState(0);
+
   return (
     <section className="home-layout">
       {/* ---------- Needs me ---------- */}
@@ -1250,7 +1255,16 @@ function Home({
       )}
 
       {/* ---------- Quick capture: snap-a-photo — always available ---------- */}
-      <DocumentDropZone vehicleId={vehicleId} onComplete={onRefresh} />
+      <DocumentDropZone
+        vehicleId={vehicleId}
+        onComplete={() => {
+          setDocsRefreshKey((k) => k + 1);
+          onRefresh();
+        }}
+      />
+
+      {/* ---------- Documents on this vehicle (per-VIN folders view) ----- */}
+      <VehicleDocumentsPanel vehicleId={vehicleId} refreshKey={docsRefreshKey} />
     </section>
   );
 }
@@ -2050,6 +2064,125 @@ function MaintenanceList({ items }: { items: MaintenanceItem[] }) {
             </span>
           </li>
         ))}
+      </ul>
+    </div>
+  );
+}
+
+// ============================================================
+// Vehicle Documents Panel — folders view of uploaded documents
+// ============================================================
+//
+// Lists documents on the current vehicle grouped by category (insurance,
+// loan, service, recall, registration, sale, other). Powers the "everything
+// I have on this car" surface. Hidden entirely when the vehicle has zero
+// documents so the empty state doesn't clutter Home for new users.
+//
+// Data source: GET /api/vehicles/:vehicleId/documents which returns
+// `documents`, `by_category`, `counts`, and `total`. Refresh on mount and
+// whenever vehicleId or refreshKey changes (the dropzone bumps refreshKey
+// after a successful upload so freshly-extracted docs appear).
+function VehicleDocumentsPanel({
+  vehicleId,
+  refreshKey
+}: {
+  vehicleId: string;
+  refreshKey?: number;
+}) {
+  const [response, setResponse] = useState<{
+    documents: UploadedDocument[];
+    by_category: Record<string, UploadedDocument[]> | null;
+    counts: Record<string, number> | null;
+    total: number;
+  } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    api<{
+      documents: UploadedDocument[];
+      by_category: Record<string, UploadedDocument[]> | null;
+      counts: Record<string, number> | null;
+      total: number;
+    }>(`/api/vehicles/${vehicleId}/documents`)
+      .then((data) => {
+        if (!alive) return;
+        setResponse(data);
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setError(err instanceof Error ? err.message : "Could not load documents");
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [vehicleId, refreshKey]);
+
+  // Hide entirely while loading and when empty — the dropzone above is the
+  // primary affordance for a vehicle with zero docs.
+  if (loading || !response || response.total === 0) return null;
+  if (error) {
+    return <div className="sub-panel"><div className="error small">{error}</div></div>;
+  }
+
+  const categoryLabels: Record<string, string> = {
+    insurance: "Insurance",
+    loan: "Loan & lease",
+    registration: "Registration",
+    recall: "Recall notices",
+    service: "Service records",
+    sale: "Sale paperwork",
+    other: "Other"
+  };
+  // Display order favors what the user is most likely to look for.
+  const ordered = [
+    "insurance",
+    "loan",
+    "service",
+    "recall",
+    "registration",
+    "sale",
+    "other"
+  ] as const;
+
+  return (
+    <div className="sub-panel vehicle-documents-panel">
+      <h3>Documents on this vehicle</h3>
+      <p className="small muted">
+        {response.total} document{response.total === 1 ? "" : "s"} on file
+      </p>
+      <ul className="document-folders-list">
+        {ordered.map((cat) => {
+          const docs = response.by_category?.[cat] ?? [];
+          if (docs.length === 0) return null;
+          return (
+            <li key={cat} className="document-folder">
+              <details>
+                <summary>
+                  <span className="folder-label">
+                    <FileImage size={14} /> {categoryLabels[cat]}
+                  </span>
+                  <span className="folder-count small">{docs.length}</span>
+                </summary>
+                <ul className="document-folder-items">
+                  {docs.map((d) => (
+                    <li key={d.id} className="document-item">
+                      <span className="small">{d.file_name}</span>
+                      <span className="small muted">
+                        {new Date(d.uploaded_at).toLocaleDateString()}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

@@ -2055,3 +2055,65 @@ label.checkbox-row a {
   font-size: 13px;
   color: #666;
 }
+
+/* ============================================================
+   VEHICLE DOCUMENTS PANEL — per-VIN folders view
+   ============================================================ */
+.vehicle-documents-panel {
+  margin-top: 16px;
+}
+.vehicle-documents-panel h3 {
+  margin: 0 0 4px;
+}
+.document-folders-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+}
+.document-folder {
+  border-top: 1px solid #ececec;
+  padding: 0;
+}
+.document-folder:last-child {
+  border-bottom: 1px solid #ececec;
+}
+.document-folder summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  list-style: none;
+  padding: 10px 4px;
+  border-radius: 6px;
+}
+.document-folder summary::-webkit-details-marker { display: none; }
+.document-folder summary::marker { content: ""; }
+.document-folder summary:hover { background: #f5f5f5; }
+.folder-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  color: #333;
+}
+.folder-count {
+  background: #f0f0f0;
+  border-radius: 999px;
+  padding: 2px 10px;
+  color: #666;
+  font-weight: 500;
+}
+.document-folder-items {
+  list-style: none;
+  padding: 4px 0 12px 28px;
+  margin: 0;
+}
+.document-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+.document-item .muted {
+  margin-left: auto;
+}
