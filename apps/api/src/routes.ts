@@ -17,6 +17,7 @@ import {
   applyExtractedDocument,
   planAttachmentsForDispatch,
   resolveAttachmentsForDispatch,
+  createDocumentSignedUrl,
   type DocumentKind,
   type PlannedAttachment
 } from "./services/documents.js";
@@ -2067,6 +2068,30 @@ router.get("/api/vehicles/:vehicleId/documents", async (req, res) => {
     counts: category ? null : counts,
     total: documents.length
   });
+});
+
+/**
+ * Generate a short-TTL signed URL so the user can open or download a
+ * document straight from the VehicleDocumentsPanel folders view. Ownership
+ * is enforced via the RLS-scoped req.db client first — if the user doesn't
+ * own the document, RLS returns no row and we respond 404 (rather than 403)
+ * to avoid leaking existence of documents on other accounts.
+ */
+router.get("/api/documents/:id/signed-url", async (req, res) => {
+  const id = z.string().uuid().parse(req.params.id);
+
+  const { data: ownership } = await req
+    .db!.from("uploaded_documents")
+    .select("id")
+    .eq("id", id)
+    .maybeSingle();
+  if (!ownership) return res.status(404).json({ error: "Not found" });
+
+  const result = await createDocumentSignedUrl(id, 300);
+  if (!result) {
+    return res.status(500).json({ error: "Could not generate signed URL" });
+  }
+  return res.json(result);
 });
 
 // ---------- MCP token issuance (used from web app to generate a paste-able token) ----------

@@ -2117,6 +2117,13 @@ label.checkbox-row a {
 .document-item .muted {
   margin-left: auto;
 }
+.document-open-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
 
 /* ============================================================
    DISPATCH MODAL — "Will include" attachment line under email preview

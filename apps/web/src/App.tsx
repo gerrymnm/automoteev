@@ -2103,6 +2103,27 @@ function VehicleDocumentsPanel({
   } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Tracks which document is currently fetching its signed URL so we can
+  // disable the Open button + show a spinner without freezing the rest of
+  // the panel. Cleared in finally{}.
+  const [openingDocId, setOpeningDocId] = useState<string | null>(null);
+
+  async function openDoc(docId: string) {
+    setOpeningDocId(docId);
+    setError(null);
+    try {
+      const result = await api<{ signed_url: string }>(
+        `/api/documents/${docId}/signed-url`
+      );
+      // noopener,noreferrer prevents the new tab from referencing window.opener
+      // — standard precaution since the signed URL points at user-uploaded content.
+      window.open(result.signed_url, "_blank", "noopener,noreferrer");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not open document");
+    } finally {
+      setOpeningDocId(null);
+    }
+  }
 
   useEffect(() => {
     let alive = true;
@@ -2182,6 +2203,20 @@ function VehicleDocumentsPanel({
                       <span className="small muted">
                         {new Date(d.uploaded_at).toLocaleDateString()}
                       </span>
+                      <button
+                        type="button"
+                        className="ghost small document-open-btn"
+                        onClick={() => openDoc(d.id)}
+                        disabled={openingDocId === d.id}
+                        aria-label={`Open ${d.file_name}`}
+                      >
+                        {openingDocId === d.id ? (
+                          <Loader2 size={12} className="spinner" />
+                        ) : (
+                          <ExternalLink size={12} />
+                        )}{" "}
+                        Open
+                      </button>
                     </li>
                   ))}
                 </ul>

@@ -532,6 +532,37 @@ export async function resolveAttachmentsForDispatch(
   return resolved;
 }
 
+/**
+ * Create a short-TTL signed URL for a stored document so the user can open
+ * or download it from the per-VIN folders panel. Caller is expected to have
+ * already verified ownership via the RLS-scoped req.db client — this helper
+ * uses the admin client to generate the URL but does NOT enforce ownership
+ * itself. Default TTL is 5 minutes which is plenty of headroom for the
+ * browser to fetch + render before the URL expires.
+ */
+export async function createDocumentSignedUrl(
+  documentId: string,
+  ttlSeconds = 300
+): Promise<{ signed_url: string; file_name: string; expires_in_seconds: number } | null> {
+  const { data: doc } = await supabaseAdmin
+    .from("uploaded_documents")
+    .select("storage_path, file_name")
+    .eq("id", documentId)
+    .maybeSingle();
+  if (!doc?.storage_path) return null;
+
+  const { data, error } = await supabaseAdmin.storage
+    .from(STORAGE_BUCKET)
+    .createSignedUrl(doc.storage_path as string, ttlSeconds);
+  if (error || !data?.signedUrl) return null;
+
+  return {
+    signed_url: data.signedUrl,
+    file_name: (doc.file_name as string) ?? "document",
+    expires_in_seconds: ttlSeconds
+  };
+}
+
 function promptForKind(kind: DocumentKind): string {
   switch (kind) {
     case "insurance_dec_page":
