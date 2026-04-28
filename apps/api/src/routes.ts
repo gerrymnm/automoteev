@@ -1927,6 +1927,7 @@ router.post("/api/documents", upload.single("file"), async (req, res) => {
       "recall_notice",
       "service_record",
       "sale_paperwork",
+      "drivers_license",
       "other"
     ]),
     vehicle_id: z.string().uuid().optional()

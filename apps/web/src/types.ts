@@ -237,6 +237,7 @@ export type DocumentCategory =
   | "recall"
   | "service"
   | "sale"
+  | "identity"
   | "other";
 
 export interface UploadedDocument {
@@ -251,6 +252,7 @@ export interface UploadedDocument {
     | "recall_notice"
     | "service_record"
     | "sale_paperwork"
+    | "drivers_license"
     | "other";
   category: DocumentCategory | null;
   storage_path?: string;

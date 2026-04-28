@@ -2192,20 +2192,30 @@ function VehicleDocumentsPanel({
 // Document Drop Zone (image capture for dec page / loan statement)
 // ============================================================
 function DocumentDropZone({ vehicleId, onComplete }: { vehicleId: string; onComplete: () => void }) {
-  const [uploading, setUploading] = useState<"insurance_dec_page" | "loan_statement" | null>(null);
+  const [uploading, setUploading] = useState<
+    "insurance_dec_page" | "loan_statement" | "drivers_license" | null
+  >(null);
   const [pending, setPending] = useState<UploadedDocument | null>(null);
   const [error, setError] = useState<string | null>(null);
   const insuranceInputRef = useRef<HTMLInputElement>(null);
   const loanInputRef = useRef<HTMLInputElement>(null);
+  const dlInputRef = useRef<HTMLInputElement>(null);
 
-  async function uploadAndExtract(file: File, kind: "insurance_dec_page" | "loan_statement") {
+  async function uploadAndExtract(
+    file: File,
+    kind: "insurance_dec_page" | "loan_statement" | "drivers_license"
+  ) {
     setUploading(kind);
     setError(null);
     try {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("document_kind", kind);
-      formData.append("vehicle_id", vehicleId);
+      // DL is user-scoped — don't bind it to a specific vehicle. The backend
+      // falls back to users/<userId>/identity/ for null vehicle_id uploads.
+      if (kind !== "drivers_license") {
+        formData.append("vehicle_id", vehicleId);
+      }
 
       const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:4000";
       const { data } = await supabase.auth.getSession();
@@ -2252,9 +2262,16 @@ function DocumentDropZone({ vehicleId, onComplete }: { vehicleId: string; onComp
   async function applyExtracted() {
     if (!pending) return;
     try {
+      // DL applies to user_pii, not a specific vehicle — skip vehicle_id.
+      // Other kinds (insurance, loan) need the vehicle_id to upsert into
+      // insurance_accounts / loan_lease_accounts on that vehicle.
+      const body =
+        pending.document_kind === "drivers_license"
+          ? {}
+          : { vehicle_id: vehicleId };
       await api(`/api/documents/${pending.id}/apply`, {
         method: "POST",
-        body: JSON.stringify({ vehicle_id: vehicleId })
+        body: JSON.stringify(body)
       });
       setPending(null);
       setUploading(null);
@@ -2313,6 +2330,28 @@ function DocumentDropZone({ vehicleId, onComplete }: { vehicleId: string; onComp
             if (f) void uploadAndExtract(f, "loan_statement");
           }}
         />
+
+        <button
+          type="button"
+          className="upload-card"
+          onClick={() => dlInputRef.current?.click()}
+          disabled={uploading !== null}
+        >
+          {uploading === "drivers_license" ? <Loader2 size={26} className="spinner" /> : <ShieldCheck size={26} />}
+          <strong>Driver's license</strong>
+          <span className="small muted">Saves you from re-typing for insurance quotes</span>
+        </button>
+        <input
+          ref={dlInputRef}
+          type="file"
+          accept="image/*,application/pdf"
+          capture="environment"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void uploadAndExtract(f, "drivers_license");
+          }}
+        />
       </div>
 
       {pending && pending.extraction_status === "processing" && (
@@ -2324,7 +2363,18 @@ function DocumentDropZone({ vehicleId, onComplete }: { vehicleId: string; onComp
           <strong>Found:</strong>
           <ul className="small">
             {Object.entries(pending.extracted_data)
-              .filter(([_, v]) => v !== null && v !== undefined && v !== "")
+              .filter(
+                ([k, v]) =>
+                  v !== null &&
+                  v !== undefined &&
+                  v !== "" &&
+                  // Hide internal/encrypted fields from the user-facing review.
+                  // dl_number_encrypted is the ciphertext we'll write to user_pii;
+                  // the redacted display string (dl_number_redacted = "••••1234")
+                  // is what the user actually sees.
+                  !k.endsWith("_encrypted") &&
+                  k !== "error"
+              )
               .slice(0, 8)
               .map(([k, v]) => (
                 <li key={k}><span className="muted">{k.replaceAll("_", " ")}:</span> {String(v)}</li>

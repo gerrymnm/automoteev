@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { env } from "../config.js";
 import { supabaseAdmin } from "../supabase.js";
+import { encryptField } from "../security/encryption.js";
 
 /**
  * Document upload + AI extraction service.
@@ -24,6 +25,7 @@ export type DocumentKind =
   | "recall_notice"
   | "service_record"
   | "sale_paperwork"
+  | "drivers_license"
   | "other";
 
 export type DocumentCategory =
@@ -33,6 +35,7 @@ export type DocumentCategory =
   | "recall"
   | "service"
   | "sale"
+  | "identity"
   | "other";
 
 /**
@@ -40,6 +43,9 @@ export type DocumentCategory =
  * what the user sees when drilling into a vehicle's documents ("Insurance",
  * "Loan", etc.). Stored explicitly on the row so future re-categorization
  * doesn't require re-deriving from kind.
+ *
+ * Note: drivers_license maps to 'identity' which is USER-scoped, not
+ * vehicle-scoped — the storage path falls back to users/<userId>/identity/.
  */
 export function documentKindToCategory(kind: DocumentKind): DocumentCategory {
   switch (kind) {
@@ -56,6 +62,8 @@ export function documentKindToCategory(kind: DocumentKind): DocumentCategory {
       return "service";
     case "sale_paperwork":
       return "sale";
+    case "drivers_license":
+      return "identity";
     case "other":
     default:
       return "other";
@@ -213,6 +221,22 @@ export async function extractDocument(documentId: string): Promise<UploadedDocum
     const cleaned = textBlock.text.replace(/```json\s*|\s*```/g, "").trim();
     const parsed = JSON.parse(cleaned);
 
+    // PII handling for driver's license: extracted JSON may contain a raw
+    // DL number which should NEVER be persisted in plaintext at rest. We
+    // encrypt it immediately and store ONLY the ciphertext + a redacted
+    // display string. The plaintext is dropped from the parsed object
+    // before it reaches extracted_data.
+    if (doc.document_kind === "drivers_license") {
+      const rawDl =
+        typeof parsed.dl_number === "string" ? parsed.dl_number.trim() : null;
+      if (rawDl && rawDl.length >= 4) {
+        parsed.dl_number_encrypted = encryptField(rawDl);
+        parsed.dl_number_redacted = `\u2022\u2022\u2022\u2022${rawDl.slice(-4)}`;
+      }
+      // Drop plaintext from anywhere in the parsed payload before we persist.
+      delete parsed.dl_number;
+    }
+
     const { data: updated } = await supabaseAdmin
       .from("uploaded_documents")
       .update({
@@ -321,6 +345,28 @@ export async function applyExtractedDocument(params: {
     if (Object.keys(update).length > 2) {
       await supabaseAdmin.from("loan_lease_accounts").upsert(update, { onConflict: "vehicle_id" });
     }
+  } else if (doc.document_kind === "drivers_license") {
+    // DL applies to the USER not a vehicle. dl_number_encrypted is already
+    // ciphertext (encrypted in extractDocument before persisting); we copy
+    // it directly into user_pii without re-encrypting. dl_collected_at is
+    // the trigger that the just-in-time DLPromptModal uses to decide
+    // whether to fire — setting it here means future insurance dispatches
+    // skip the modal.
+    const update: Record<string, unknown> = { user_id: params.userId };
+    if (typeof data.dl_number_encrypted === "string" && data.dl_number_encrypted) {
+      update.dl_number_encrypted = data.dl_number_encrypted;
+      update.dl_collected_at = new Date().toISOString();
+      applied.push("dl_number");
+    }
+    if (typeof data.dl_state === "string" && data.dl_state) {
+      update.dl_state = data.dl_state;
+      applied.push("dl_state");
+    }
+    if (Object.keys(update).length > 1) {
+      await supabaseAdmin
+        .from("user_pii")
+        .upsert(update, { onConflict: "user_id" });
+    }
   }
 
   return { applied, data };
@@ -367,6 +413,23 @@ If a field is unclear or missing, set it to null. Use cents not dollars.`;
     case "recall_notice":
       return `Extract recall notice info as JSON only:
 { "campaign_id": string|null, "component": string|null, "summary": string|null, "remedy": string|null, "vehicle_year": int|null, "vehicle_make": string|null, "vehicle_model": string|null }`;
+
+    case "drivers_license":
+      return `You are extracting structured data from a US driver's license.
+Return ONLY valid JSON, no prose, no code fences. Fields:
+{
+  "dl_number": string | null,         // The license number EXACTLY as printed (preserve dashes/letters)
+  "dl_state": string | null,          // 2-letter state code (e.g. "CA", "TX", "NY")
+  "full_name": string | null,         // First Middle Last
+  "expiration_date": "YYYY-MM-DD" | null,
+  "issued_date": "YYYY-MM-DD" | null,
+  "date_of_birth": "YYYY-MM-DD" | null,
+  "address_line1": string | null,
+  "city": string | null,
+  "zip_code": string | null
+}
+If a field is unclear, partially obscured, or not visible, set it to null.
+If the image is NOT a driver's license, return: {"error": "not a driver's license"}.`;
 
     default:
       return `Extract any structured data you can find in this image. Return JSON only with fields you're confident about.`;
