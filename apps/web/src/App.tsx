@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Clock3,
   DollarSign,
+  Edit3,
   ExternalLink,
   FileImage,
   Info,
@@ -25,6 +26,7 @@ import {
   ShieldCheck,
   Sparkles,
   Star,
+  Trash2,
   TrendingUp,
   Wrench,
   X
@@ -34,6 +36,7 @@ import { isSupabaseConfigured, supabase } from "./supabase";
 import type {
   AgentWorkingItem,
   AutonomyStatus,
+  CostPeriod,
   Dashboard,
   DispatchPayload,
   DispatchProvider,
@@ -44,6 +47,10 @@ import type {
   PlannedAttachment,
   Provider,
   RecallRecord,
+  RenewableItem,
+  RenewableItemWithStatus,
+  RenewableKind,
+  RenewalsListResponse,
   SubscriptionStatus,
   Task,
   ThreadResponse,
@@ -1269,6 +1276,13 @@ function Home({
         }}
       />
 
+      {/* ---------- Renewals on file (DL, insurance, warranties, etc.) ---- */}
+      <RenewalsPanel
+        vehicleId={vehicleId}
+        refreshKey={docsRefreshKey}
+        onChange={onRefresh}
+      />
+
       {/* ---------- Documents on this vehicle (per-VIN folders view) ----- */}
       <VehicleDocumentsPanel vehicleId={vehicleId} refreshKey={docsRefreshKey} />
     </section>
@@ -2071,6 +2085,590 @@ function MaintenanceList({ items }: { items: MaintenanceItem[] }) {
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+// ============================================================
+// Renewals — DL, insurance, warranties, memberships, subscriptions
+// ============================================================
+//
+// Lists everything in the renewable_items table with status decoration
+// (days_until_expiration, is_expired, is_due_soon) for color-coded badges.
+// Backed by GET /api/renewals; mutations go through POST/PATCH/DELETE/dismiss
+// and trigger a local refresh.
+//
+// DL rows that came from a document extraction carry source_document_id
+// behind the scenes; that doesn't change the UX here — the user can still
+// edit / snooze / delete them like any manually-added row.
+
+function kindLabelFor(kind: RenewableKind): string {
+  switch (kind) {
+    case "drivers_license":
+      return "Driver's License";
+    case "insurance_policy":
+      return "Insurance policy";
+    case "vehicle_registration":
+      return "Vehicle registration";
+    case "vehicle_warranty_basic":
+      return "Bumper-to-bumper warranty";
+    case "vehicle_warranty_powertrain":
+      return "Powertrain warranty";
+    case "extended_warranty":
+      return "Extended warranty";
+    case "prepaid_maintenance":
+      return "Prepaid maintenance";
+    case "gap_insurance":
+      return "Gap insurance";
+    case "tire_protection":
+      return "Tire protection";
+    case "roadside_assistance":
+      return "Roadside assistance";
+    case "aaa_membership":
+      return "AAA membership";
+    case "membership":
+      return "Membership";
+    case "subscription":
+      return "Subscription";
+    default:
+      return "Other";
+  }
+}
+
+function kindIconFor(kind: RenewableKind, size = 16) {
+  switch (kind) {
+    case "drivers_license":
+      return <ShieldCheck size={size} />;
+    case "insurance_policy":
+    case "gap_insurance":
+      return <Lock size={size} />;
+    case "vehicle_registration":
+      return <FileImage size={size} />;
+    case "vehicle_warranty_basic":
+    case "vehicle_warranty_powertrain":
+    case "extended_warranty":
+    case "prepaid_maintenance":
+    case "tire_protection":
+      return <Wrench size={size} />;
+    case "roadside_assistance":
+      return <Phone size={size} />;
+    case "aaa_membership":
+    case "membership":
+      return <Star size={size} />;
+    case "subscription":
+      return <DollarSign size={size} />;
+    default:
+      return <Info size={size} />;
+  }
+}
+
+// Categorize "vehicle-scoped" kinds vs user-scoped. Drives the default
+// state of the "Tie to my current vehicle" toggle in the form.
+function isKindVehicleScoped(kind: RenewableKind): boolean {
+  switch (kind) {
+    case "vehicle_registration":
+    case "vehicle_warranty_basic":
+    case "vehicle_warranty_powertrain":
+    case "extended_warranty":
+    case "prepaid_maintenance":
+    case "gap_insurance":
+    case "tire_protection":
+    case "insurance_policy":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function formatDaysUntil(days: number | null): string {
+  if (days === null) return "—";
+  if (days < 0) return `${Math.abs(days)}d ago`;
+  if (days === 0) return "today";
+  if (days === 1) return "tomorrow";
+  if (days < 30) return `in ${days}d`;
+  if (days < 365) return `in ${Math.round(days / 30)} mo`;
+  return `in ${Math.round((days / 365) * 10) / 10} yr`;
+}
+
+function RenewalsPanel({
+  vehicleId,
+  refreshKey,
+  onChange
+}: {
+  vehicleId: string;
+  refreshKey?: number;
+  onChange: () => void;
+}) {
+  const [items, setItems] = useState<RenewableItemWithStatus[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [showAdd, setShowAdd] = useState(false);
+  const [editing, setEditing] = useState<RenewableItem | null>(null);
+  // Bumped by mutations inside this panel so the list re-fetches without
+  // forcing a parent re-render. The parent's onChange still fires for
+  // anything outside the panel that wants to know.
+  const [bumpKey, setBumpKey] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setError(null);
+    api<RenewalsListResponse>(
+      `/api/renewals?vehicle_id=${encodeURIComponent(vehicleId)}`
+    )
+      .then((data) => {
+        if (alive) setItems(data.items);
+      })
+      .catch((err) => {
+        if (alive)
+          setError(err instanceof Error ? err.message : "Could not load renewals");
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [vehicleId, refreshKey, bumpKey]);
+
+  function refreshLocal() {
+    setBumpKey((k) => k + 1);
+    onChange();
+  }
+
+  async function snooze(itemId: string) {
+    try {
+      await api(`/api/renewals/${itemId}/dismiss`, {
+        method: "POST",
+        body: JSON.stringify({})
+      });
+      refreshLocal();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not snooze");
+    }
+  }
+
+  async function remove(itemId: string) {
+    if (
+      !window.confirm(
+        "Delete this renewal? You can re-add it manually if needed."
+      )
+    )
+      return;
+    try {
+      await api(`/api/renewals/${itemId}`, { method: "DELETE" });
+      refreshLocal();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete");
+    }
+  }
+
+  if (loading) return null;
+
+  return (
+    <div className="sub-panel renewals-panel">
+      <div className="renewals-head">
+        <div>
+          <h3>Renewals on file</h3>
+          <p className="small muted">
+            Things that need renewing — license, insurance, warranties,
+            memberships, subscriptions.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="secondary small"
+          onClick={() => setShowAdd(true)}
+        >
+          <Plus size={14} /> Add
+        </button>
+      </div>
+
+      {error && <div className="error small">{error}</div>}
+
+      {items && items.length === 0 && (
+        <p className="small muted renewals-empty">
+          Nothing tracked yet. Add a warranty, AAA membership, registration,
+          or anything else with a renewal date.
+        </p>
+      )}
+
+      {items && items.length > 0 && (
+        <ul className="renewals-list">
+          {items.map((item) => (
+            <RenewalRow
+              key={item.id}
+              item={item}
+              onEdit={() => setEditing(item)}
+              onSnooze={() => snooze(item.id)}
+              onDelete={() => remove(item.id)}
+            />
+          ))}
+        </ul>
+      )}
+
+      {showAdd && (
+        <RenewalFormModal
+          vehicleId={vehicleId}
+          onClose={() => setShowAdd(false)}
+          onSaved={() => {
+            setShowAdd(false);
+            refreshLocal();
+          }}
+        />
+      )}
+
+      {editing && (
+        <RenewalFormModal
+          vehicleId={vehicleId}
+          existing={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            refreshLocal();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function RenewalRow({
+  item,
+  onEdit,
+  onSnooze,
+  onDelete
+}: {
+  item: RenewableItemWithStatus;
+  onEdit: () => void;
+  onSnooze: () => void;
+  onDelete: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  // Color-code the badge by urgency: red=expired, orange=due soon, neutral=future.
+  const badgeClass = item.is_expired
+    ? "renewal-badge-expired"
+    : item.is_due_soon
+      ? "renewal-badge-due"
+      : "renewal-badge-future";
+
+  // Mileage-only items show the mileage instead of a relative time. Date
+  // items show "Xd ago" / "in Xd" / "in N mo". Items with both expiration
+  // axes prefer the date for display brevity.
+  const badgeText =
+    item.expires_at_mileage && !item.expires_at
+      ? `at ${item.expires_at_mileage.toLocaleString()} mi`
+      : formatDaysUntil(item.days_until_expiration);
+
+  return (
+    <li className={`renewal-row ${item.is_expired ? "expired" : ""}`}>
+      <button
+        type="button"
+        className="renewal-summary"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+      >
+        <span className="renewal-icon">{kindIconFor(item.kind, 16)}</span>
+        <span className="renewal-label">
+          <strong>{item.label}</strong>
+          {item.provider_name && (
+            <span className="small muted"> · {item.provider_name}</span>
+          )}
+          {item.expires_at && (
+            <span className="small muted"> · {item.expires_at}</span>
+          )}
+          {item.auto_renews && (
+            <span className="renewal-auto-renew small"> · auto-renews</span>
+          )}
+        </span>
+        <span className={`renewal-badge ${badgeClass}`}>{badgeText}</span>
+        <ChevronRight
+          size={14}
+          className="renewal-chev"
+          style={{ transform: expanded ? "rotate(90deg)" : "none" }}
+        />
+      </button>
+      {expanded && (
+        <div className="renewal-actions">
+          <button type="button" className="ghost small" onClick={onEdit}>
+            <Edit3 size={12} /> Edit
+          </button>
+          <button type="button" className="ghost small" onClick={onSnooze}>
+            <BellOff size={12} /> Snooze 7d
+          </button>
+          <button
+            type="button"
+            className="ghost small renewal-delete"
+            onClick={onDelete}
+          >
+            <Trash2 size={12} /> Delete
+          </button>
+        </div>
+      )}
+    </li>
+  );
+}
+
+function RenewalFormModal({
+  vehicleId,
+  existing,
+  onClose,
+  onSaved
+}: {
+  vehicleId: string;
+  existing?: RenewableItem;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [kind, setKind] = useState<RenewableKind>(
+    existing?.kind ?? "membership"
+  );
+  const [label, setLabel] = useState(existing?.label ?? "");
+  const [providerName, setProviderName] = useState(
+    existing?.provider_name ?? ""
+  );
+  const [expiresAt, setExpiresAt] = useState(existing?.expires_at ?? "");
+  const [expiresAtMileage, setExpiresAtMileage] = useState(
+    existing?.expires_at_mileage?.toString() ?? ""
+  );
+  const [autoRenews, setAutoRenews] = useState(existing?.auto_renews ?? false);
+  const [costDollars, setCostDollars] = useState(
+    existing?.cost_cents != null ? (existing.cost_cents / 100).toString() : ""
+  );
+  const [costPeriod, setCostPeriod] = useState<CostPeriod | "">(
+    existing?.cost_period ?? ""
+  );
+  const [reminderDays, setReminderDays] = useState(
+    existing?.reminder_days_before?.toString() ?? ""
+  );
+  const [vehicleScoped, setVehicleScoped] = useState(
+    existing ? existing.vehicle_id !== null : isKindVehicleScoped(kind)
+  );
+  const [notes, setNotes] = useState(existing?.notes ?? "");
+
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // When kind changes on a fresh form, autofill the label with the kind's
+  // default. We deliberately don't clobber a user-edited label or an
+  // existing row's saved label.
+  useEffect(() => {
+    if (!existing && label === "") {
+      setLabel(kindLabelFor(kind));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind]);
+
+  async function save() {
+    setError(null);
+    if (!label.trim()) {
+      setError("Label is required");
+      return;
+    }
+    if (!expiresAt && !expiresAtMileage) {
+      setError("Set an expiration date or mileage");
+      return;
+    }
+    if (expiresAt && !/^\d{4}-\d{2}-\d{2}$/.test(expiresAt)) {
+      setError("Date must be YYYY-MM-DD");
+      return;
+    }
+
+    // Build the request body. The PATCH endpoint treats `undefined` fields
+    // as "no change" while explicit nulls clear them — we send concrete
+    // values for everything we surface so the form is the source of truth.
+    const body: Record<string, unknown> = {
+      kind,
+      label: label.trim(),
+      provider_name: providerName.trim() || null,
+      expires_at: expiresAt || null,
+      expires_at_mileage: expiresAtMileage ? Number(expiresAtMileage) : null,
+      auto_renews: autoRenews,
+      cost_cents: costDollars ? Math.round(Number(costDollars) * 100) : null,
+      cost_period: costPeriod || null,
+      notes: notes.trim() || null,
+      vehicle_id: vehicleScoped ? vehicleId : null
+    };
+    if (reminderDays) {
+      const n = Number(reminderDays);
+      if (Number.isInteger(n) && n > 0) body.reminder_days_before = n;
+    }
+
+    setBusy(true);
+    try {
+      if (existing) {
+        await api(`/api/renewals/${existing.id}`, {
+          method: "PATCH",
+          body: JSON.stringify(body)
+        });
+      } else {
+        await api(`/api/renewals`, {
+          method: "POST",
+          body: JSON.stringify(body)
+        });
+      }
+      onSaved();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Save failed");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal renewal-form-modal"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="modal-head">
+          <h2>{existing ? "Edit renewal" : "Add a renewal"}</h2>
+          <button
+            className="ghost icon-button"
+            onClick={onClose}
+            aria-label="Close"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="form-grid">
+          <label>
+            What is it?
+            <select
+              value={kind}
+              onChange={(e) => setKind(e.target.value as RenewableKind)}
+            >
+              <option value="drivers_license">Driver's License</option>
+              <option value="insurance_policy">Insurance policy</option>
+              <option value="vehicle_registration">Vehicle registration</option>
+              <option value="vehicle_warranty_basic">
+                Bumper-to-bumper warranty
+              </option>
+              <option value="vehicle_warranty_powertrain">
+                Powertrain warranty
+              </option>
+              <option value="extended_warranty">Extended warranty</option>
+              <option value="prepaid_maintenance">Prepaid maintenance</option>
+              <option value="gap_insurance">Gap insurance</option>
+              <option value="tire_protection">Tire protection</option>
+              <option value="roadside_assistance">Roadside assistance</option>
+              <option value="aaa_membership">AAA membership</option>
+              <option value="membership">Membership (other)</option>
+              <option value="subscription">Subscription</option>
+              <option value="other">Other</option>
+            </select>
+          </label>
+          <Field label="Label" value={label} onChange={setLabel} required />
+          <Field
+            label="Provider (optional)"
+            value={providerName}
+            onChange={setProviderName}
+          />
+          <Field
+            label="Expires (date)"
+            value={expiresAt}
+            onChange={setExpiresAt}
+            type="date"
+          />
+          <Field
+            label="Or expires at mileage"
+            value={expiresAtMileage}
+            onChange={setExpiresAtMileage}
+            placeholder="e.g. 60000"
+          />
+        </div>
+
+        <details className="renewal-form-advanced">
+          <summary className="small muted">
+            Cost &amp; reminder settings
+          </summary>
+          <div className="form-grid">
+            <Field
+              label="Cost (optional)"
+              value={costDollars}
+              onChange={setCostDollars}
+              money
+            />
+            <label>
+              Period
+              <select
+                value={costPeriod}
+                onChange={(e) =>
+                  setCostPeriod(e.target.value as CostPeriod | "")
+                }
+              >
+                <option value="">—</option>
+                <option value="one_time">One time</option>
+                <option value="monthly">Monthly</option>
+                <option value="annual">Annual</option>
+                <option value="biennial">Every 2 years</option>
+              </select>
+            </label>
+            <Field
+              label="Remind me N days before"
+              value={reminderDays}
+              onChange={setReminderDays}
+              placeholder="default: 30"
+            />
+          </div>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={autoRenews}
+              onChange={(e) => setAutoRenews(e.target.checked)}
+            />
+            <span>This auto-renews if I do nothing</span>
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={vehicleScoped}
+              onChange={(e) => setVehicleScoped(e.target.checked)}
+            />
+            <span>Tie this to my current vehicle</span>
+          </label>
+        </details>
+
+        <label>
+          Notes (optional)
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            rows={2}
+          />
+        </label>
+
+        {error && <div className="error">{error}</div>}
+
+        <div className="button-row">
+          <button
+            className="primary"
+            type="button"
+            onClick={save}
+            disabled={busy}
+          >
+            {busy ? (
+              <>
+                <Loader2 size={14} className="spinner" /> Saving…
+              </>
+            ) : (
+              <>
+                <CheckCircle2 size={14} />{" "}
+                {existing ? "Save changes" : "Add renewal"}
+              </>
+            )}
+          </button>
+          <button
+            className="ghost"
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

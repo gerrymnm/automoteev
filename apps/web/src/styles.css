@@ -2141,3 +2141,123 @@ label.checkbox-row a {
 .email-attachments-line svg {
   flex-shrink: 0;
 }
+
+/* ============================================================
+   RENEWALS PANEL — DL, insurance, warranties, memberships
+   ============================================================ */
+.renewals-panel {
+  margin-top: 16px;
+}
+.renewals-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.renewals-head h3 {
+  margin: 0 0 2px;
+}
+.renewals-head p {
+  margin: 0;
+}
+.renewals-empty {
+  margin: 8px 0 0;
+}
+.renewals-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  border-top: 1px solid #ececec;
+}
+.renewal-row {
+  border-bottom: 1px solid #ececec;
+}
+.renewal-row.expired .renewal-summary {
+  background: #fef6f6;
+}
+.renewal-summary {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 6px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  border-radius: 6px;
+}
+.renewal-summary:hover {
+  background: #f7f7f7;
+}
+.renewal-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: #555;
+  width: 22px;
+}
+.renewal-label {
+  flex: 1;
+  min-width: 0;
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.renewal-auto-renew {
+  color: #666;
+  font-style: italic;
+}
+.renewal-badge {
+  flex-shrink: 0;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.renewal-badge-expired {
+  background: #fce4e4;
+  color: #b32c2c;
+}
+.renewal-badge-due {
+  background: #fff1d6;
+  color: #a96416;
+}
+.renewal-badge-future {
+  background: #f0f0f0;
+  color: #555;
+}
+.renewal-chev {
+  flex-shrink: 0;
+  color: #999;
+  transition: transform 120ms ease;
+}
+.renewal-actions {
+  display: flex;
+  gap: 6px;
+  padding: 4px 6px 12px 38px;
+  flex-wrap: wrap;
+}
+.renewal-actions .ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.renewal-actions .renewal-delete {
+  color: #b32c2c;
+}
+
+/* Renewal form modal — the advanced details collapser */
+.renewal-form-modal .renewal-form-advanced {
+  margin: 12px 0;
+  border-top: 1px solid #ececec;
+  padding-top: 8px;
+}
+.renewal-form-modal .renewal-form-advanced summary {
+  cursor: pointer;
+  padding: 4px 0;
+}

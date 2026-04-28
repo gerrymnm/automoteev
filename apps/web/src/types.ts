@@ -303,6 +303,65 @@ export interface VehicleDocumentsResponse {
   total: number;
 }
 
+// ============================================================================
+// Renewables (DL, insurance, warranties, memberships, subscriptions, etc.)
+// ============================================================================
+
+export type RenewableKind =
+  | "drivers_license"
+  | "insurance_policy"
+  | "vehicle_registration"
+  | "vehicle_warranty_basic"
+  | "vehicle_warranty_powertrain"
+  | "extended_warranty"
+  | "prepaid_maintenance"
+  | "gap_insurance"
+  | "tire_protection"
+  | "roadside_assistance"
+  | "aaa_membership"
+  | "membership"
+  | "subscription"
+  | "other";
+
+export type CostPeriod = "one_time" | "monthly" | "annual" | "biennial";
+
+export interface RenewableItem {
+  id: string;
+  user_id: string;
+  vehicle_id: string | null;
+  kind: RenewableKind;
+  label: string;
+  provider_name: string | null;
+  policy_number_encrypted: string | null;
+  expires_at: string | null;
+  expires_at_mileage: number | null;
+  auto_renews: boolean;
+  cost_cents: number | null;
+  cost_period: CostPeriod | null;
+  reminder_days_before: number;
+  dismissed_until: string | null;
+  source_document_id: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RenewableItemWithStatus extends RenewableItem {
+  /** Negative when the item has already expired. Null when only mileage-based. */
+  days_until_expiration: number | null;
+  /** True when dismissed_until is in the future (snoozed). */
+  is_dismissed: boolean;
+  /** True when expires_at < today. Mileage-based items don't trigger this flag. */
+  is_expired: boolean;
+  /** True when within reminder_days_before of expiration. */
+  is_due_soon: boolean;
+}
+
+export interface RenewalsListResponse {
+  items: RenewableItemWithStatus[];
+  total: number;
+}
+
 export interface MCPConnection {
   id: string;
   client_name: string;
