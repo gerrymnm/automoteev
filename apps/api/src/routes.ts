@@ -987,7 +987,37 @@ router.get("/api/home", async (req, res) => {
       cta_label: i.cta_label
     }));
 
-  const allPending = [...pendingActions, ...syntheticPending];
+  // ---- needs_user_approval tasks ----
+  // Tasks waiting on the user to approve dispatch (e.g. "Get refinance quotes"
+  // created from a recommendation but not yet approved). These belong on the
+  // home stack because they literally need the user. Skip ones whose task_type
+  // is already represented as a synthetic insight to avoid double-stacking.
+  const syntheticTaskTypes = new Set(
+    syntheticPending.map((s) => s.task_type).filter(Boolean) as string[]
+  );
+  const explicitTaskIds = new Set(pendingActions.map((p) => p.task_id));
+  const { data: approvalTasks } = await req
+    .db!.from("vehicle_tasks")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("status", "needs_user_approval")
+    .order("created_at", { ascending: false });
+  const approvalPending = (approvalTasks ?? [])
+    .filter((t: any) => !explicitTaskIds.has(t.id) && !syntheticTaskTypes.has(t.task_type))
+    .map((t: any) => ({
+      task_id: t.id,
+      vehicle_id: t.vehicle_id,
+      kind: "approval" as const,
+      title: t.title,
+      body: t.approval_summary ?? t.description ?? null,
+      options: null,
+      set_at: t.created_at,
+      category: t.category ?? null,
+      task_type: t.task_type,
+      cta_label: "Approve & contact providers"
+    }));
+
+  const allPending = [...pendingActions, ...syntheticPending, ...approvalPending];
 
   // -------- Agent working: tasks with no pending action that the agent is on --
   const { data: agentWorkingTasks } = await req

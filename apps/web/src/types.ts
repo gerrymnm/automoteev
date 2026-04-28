@@ -272,6 +272,7 @@ export type PendingActionKind =
   | "info_request"
   | "confirm_close"
   | "review_quotes"
+  | "approval"
   | "manual";
 
 export interface PendingActionOption {

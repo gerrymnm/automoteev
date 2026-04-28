@@ -1373,7 +1373,7 @@ function NeedsMeCard({
             {dispatchBusy ? (
               <><Loader2 size={14} className="spinner" /> Opening…</>
             ) : (
-              <>Open <ChevronRight size={14} /></>
+              <>{action.cta_label ?? "Approve & contact providers"} <ChevronRight size={14} /></>
             )}
           </button>
         )}
@@ -1387,6 +1387,7 @@ function iconForKindAndCategory(kind: string, category: string | null) {
   if (kind === "info_request") return <Camera size={18} />;
   if (kind === "review_quotes") return <DollarSign size={18} />;
   if (kind === "confirm_close") return <CheckCircle2 size={18} />;
+  if (kind === "approval") return <Send size={18} />;
   if (category === "insurance" || category === "lending") return <DollarSign size={18} />;
   return <AlertTriangle size={18} />;
 }
