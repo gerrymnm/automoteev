@@ -6,6 +6,8 @@ import { supabaseAdmin } from "./supabase.js";
 import { stripe, verifyStripeWebhook } from "./services/stripe.js";
 import { taskTypeToContactDept, shouldLearnContact } from "./services/contacts.js";
 import { sendPushToUser } from "./services/push.js";
+import { classifyReply } from "./services/reply-classifier.js";
+import { uploadDocument, extractDocument, type DocumentKind } from "./services/documents.js";
 
 export const webhooks = Router();
 
@@ -280,24 +282,193 @@ webhooks.post("/webhooks/email/inbound", async (req: Request, res: Response) => 
 
   console.log(`[inbound] stored email for user: ${profile.id} (task=${taskId ?? "unlinked"})`);
 
-  // Thread event: classify and record what just happened, so the timeline
-  // shows both the inbound email AND the agent's reaction. For now this is
-  // a placeholder — the real reply classifier (Claude call) lands in a
-  // follow-up. Today we just log the receipt; that's enough to keep the
-  // timeline complete.
-  if (taskId) {
-    await supabaseAdmin.from("thread_events").insert({
-      user_id: profile.id,
-      task_id: taskId,
-      kind: "agent_classification",
-      summary: `Reply received from ${fromAddress ?? "provider"} — awaiting classifier`,
-      detail: null,
-      metadata: {
-        from: fromAddress,
-        subject: data?.subject ?? null,
-        match_strategy: matchStrategy
+  // -------- Inbound attachments --------------------------------------------
+  // Resend delivers attachments inline as base64. Save each to Supabase
+  // Storage under the user's documents bucket, create an uploaded_documents
+  // row tied to the task, and trigger Claude vision classification. Each one
+  // becomes a `document_attached` thread_event so the timeline shows what
+  // arrived.
+  const attachments = parseAttachments(data?.attachments);
+  const attachedDocs: Array<{ id: string; file_name: string }> = [];
+  if (attachments.length > 0 && taskId) {
+    let taskTypeForClassify: string | null = null;
+    let vehicleIdForAttachments: string | null = null;
+    try {
+      const { data: taskRow } = await supabaseAdmin
+        .from("vehicle_tasks")
+        .select("task_type, vehicle_id")
+        .eq("id", taskId)
+        .maybeSingle();
+      taskTypeForClassify = (taskRow as any)?.task_type ?? null;
+      vehicleIdForAttachments = (taskRow as any)?.vehicle_id ?? null;
+    } catch {
+      // best-effort
+    }
+
+    for (const att of attachments) {
+      try {
+        const kind = inferDocumentKindFromContext(
+          taskTypeForClassify,
+          att.filename
+        );
+        const doc = await uploadDocument({
+          userId: profile.id,
+          vehicleId: vehicleIdForAttachments,
+          documentKind: kind,
+          fileName: att.filename,
+          mimeType: att.contentType,
+          buffer: att.buffer
+        });
+        attachedDocs.push({ id: doc.id, file_name: doc.file_name });
+
+        await supabaseAdmin.from("thread_events").insert({
+          user_id: profile.id,
+          task_id: taskId,
+          kind: "document_attached",
+          summary: `Provider attached "${att.filename}" — analyzing…`,
+          detail: null,
+          metadata: {
+            document_id: doc.id,
+            file_name: att.filename,
+            mime_type: att.contentType,
+            byte_size: att.buffer.length,
+            source: "inbound_email"
+          }
+        });
+
+        // Vision-classify in the background. Failures are logged but don't
+        // block webhook acknowledgment.
+        if (kind !== "other") {
+          void extractDocument(doc.id).catch((err) =>
+            console.error(`[inbound] extraction failed for ${doc.id}`, err)
+          );
+        }
+      } catch (err) {
+        console.error("[inbound] attachment storage failed", err);
       }
-    });
+    }
+    console.log(`[inbound] stored ${attachedDocs.length}/${attachments.length} attachment(s)`);
+  }
+
+  // -------- Reply classifier -------------------------------------------------
+  // Run Claude on the inbound body to decide what kind of reply this is, then
+  // either auto-act (acknowledgments) OR set a pending_user_action so the
+  // home screen surfaces it as a Needs you card. Always emit an
+  // agent_classification thread_event so the timeline shows the agent's
+  // reasoning, even when no user action is needed.
+  if (taskId) {
+    let classification: Awaited<ReturnType<typeof classifyReply>> | null = null;
+    try {
+      const { data: taskCtx } = await supabaseAdmin
+        .from("vehicle_tasks")
+        .select("task_type, vehicle_id")
+        .eq("id", taskId)
+        .maybeSingle();
+      const { data: vehicleCtx } = (taskCtx as any)?.vehicle_id
+        ? await supabaseAdmin
+            .from("vehicles")
+            .select("year, make, model, vin, mileage")
+            .eq("id", (taskCtx as any).vehicle_id)
+            .maybeSingle()
+        : { data: null };
+
+      const { data: outboundRow } = await supabaseAdmin
+        .from("task_emails")
+        .select("subject, body_text")
+        .eq("task_id", taskId)
+        .eq("direction", "outbound")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const vehicleSummary = vehicleCtx
+        ? `${(vehicleCtx as any).year ?? ""} ${(vehicleCtx as any).make ?? ""} ${(vehicleCtx as any).model ?? ""}, VIN ${(vehicleCtx as any).vin}, ${(vehicleCtx as any).mileage?.toLocaleString?.() ?? ""} mi`.trim()
+        : "vehicle";
+
+      classification = await classifyReply({
+        taskType: (taskCtx as any)?.task_type ?? "unknown",
+        vehicleSummary,
+        outboundSubject: (outboundRow as any)?.subject ?? null,
+        outboundBody: (outboundRow as any)?.body_text ?? null,
+        inboundFrom: fromAddress ?? "unknown",
+        inboundSubject: (data?.subject as string) ?? "(no subject)",
+        inboundBody: (data?.text as string) ?? (data?.html as string) ?? ""
+      });
+
+      // Always log the classification on the thread.
+      await supabaseAdmin.from("thread_events").insert({
+        user_id: profile.id,
+        task_id: taskId,
+        kind: "agent_classification",
+        summary: classification.summary,
+        detail: classification.reasoning || null,
+        metadata: {
+          class: classification.class,
+          fallback: classification.fallback,
+          from: fromAddress,
+          subject: data?.subject ?? null,
+          match_strategy: matchStrategy,
+          attachments: attachedDocs
+        }
+      });
+
+      // If the classifier set a pending_user_action, surface it on the home
+      // screen by writing it onto the task. We DON'T overwrite an existing
+      // pending_user_action_kind — that means an earlier, higher-priority
+      // ask is already in flight and we shouldn't displace it.
+      if (classification.pending_user_action) {
+        const { data: existing } = await supabaseAdmin
+          .from("vehicle_tasks")
+          .select("pending_user_action_kind")
+          .eq("id", taskId)
+          .maybeSingle();
+        if (!(existing as any)?.pending_user_action_kind) {
+          const pa = classification.pending_user_action;
+          await supabaseAdmin
+            .from("vehicle_tasks")
+            .update({
+              pending_user_action_kind: pa.kind,
+              pending_user_action_text: pa.text,
+              pending_user_action_options: pa.options,
+              pending_user_action_set_at: new Date().toISOString(),
+              agent_status_text: classification.summary
+            })
+            .eq("id", taskId);
+        } else {
+          // Refresh agent_status_text so the Agent Working strip stays current.
+          await supabaseAdmin
+            .from("vehicle_tasks")
+            .update({ agent_status_text: classification.summary })
+            .eq("id", taskId);
+        }
+      } else {
+        // Acknowledgment-class: just refresh the status line so the user sees
+        // the agent acknowledged it.
+        await supabaseAdmin
+          .from("vehicle_tasks")
+          .update({ agent_status_text: classification.summary })
+          .eq("id", taskId);
+      }
+    } catch (err) {
+      console.error("[inbound] classifier pipeline failed (non-fatal)", err);
+      // Make sure SOMETHING lands on the timeline even if the classifier failed.
+      if (!classification) {
+        await supabaseAdmin.from("thread_events").insert({
+          user_id: profile.id,
+          task_id: taskId,
+          kind: "agent_classification",
+          summary: `Reply received from ${fromAddress ?? "provider"} — classifier unavailable`,
+          detail: null,
+          metadata: {
+            from: fromAddress,
+            subject: data?.subject ?? null,
+            match_strategy: matchStrategy,
+            attachments: attachedDocs,
+            error: err instanceof Error ? err.message : "unknown"
+          }
+        });
+      }
+    }
   }
 
   // Push notification: this is the moment the user has been waiting for —
@@ -469,4 +640,96 @@ function firstAddress(input: unknown): string | null {
   if (typeof input === "string") return input;
   if (typeof input === "object") return (input as any).address ?? (input as any).email ?? null;
   return null;
+}
+
+/**
+ * Parse Resend inbound attachments. The webhook payload may carry attachments
+ * as either:
+ *   - { content: "<base64>", filename, content_type } (Resend default)
+ *   - { content: { type: "Buffer", data: [...] }, ... } (some forwarders)
+ *   - URLs (we ignore — we only handle inline base64 for now)
+ * Returns the buffers we can use directly.
+ */
+interface ParsedAttachment {
+  filename: string;
+  contentType: string;
+  buffer: Buffer;
+}
+
+function parseAttachments(raw: unknown): ParsedAttachment[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ParsedAttachment[] = [];
+  for (const a of raw) {
+    if (!a || typeof a !== "object") continue;
+    const aa = a as any;
+    const filename: string =
+      aa.filename ?? aa.name ?? aa.file_name ?? `attachment-${out.length + 1}`;
+    const contentType: string =
+      aa.content_type ?? aa.contentType ?? aa.mime_type ?? "application/octet-stream";
+
+    let buf: Buffer | null = null;
+    if (typeof aa.content === "string") {
+      // Most common: base64 string
+      try {
+        buf = Buffer.from(aa.content, "base64");
+      } catch {
+        buf = null;
+      }
+    } else if (aa.content && typeof aa.content === "object" && Array.isArray(aa.content.data)) {
+      buf = Buffer.from(aa.content.data);
+    }
+
+    if (!buf || buf.length === 0) {
+      continue;
+    }
+    // Only accept reasonable sizes (<= 15 MB) and supported mime types.
+    if (buf.length > 15 * 1024 * 1024) {
+      console.warn(`[inbound] skipping oversize attachment ${filename} (${buf.length} bytes)`);
+      continue;
+    }
+    if (!isAllowedMimeType(contentType)) {
+      console.warn(`[inbound] skipping disallowed mime ${contentType} for ${filename}`);
+      continue;
+    }
+    out.push({ filename, contentType, buffer: buf });
+  }
+  return out;
+}
+
+function isAllowedMimeType(mime: string): boolean {
+  const allowed = [
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/heic",
+    "image/gif"
+  ];
+  return allowed.includes(mime);
+}
+
+/**
+ * Choose a document_kind from the originating task type + filename heuristics.
+ * Used to route attachments to the right Claude vision prompt.
+ */
+function inferDocumentKindFromContext(
+  taskType: string | null,
+  filename: string
+): DocumentKind {
+  const f = filename.toLowerCase();
+  if (taskType === "recall_repair" || taskType === "recall_appointment") {
+    return "recall_notice";
+  }
+  if (taskType === "insurance_quote") return "insurance_dec_page";
+  if (taskType === "refinance" || taskType === "payoff_quote") return "loan_statement";
+  if (taskType === "sell_vehicle") return "sale_paperwork";
+  if (f.includes("recall")) return "recall_notice";
+  if (f.includes("insurance") || f.includes("dec") || f.includes("declaration"))
+    return "insurance_dec_page";
+  if (f.includes("loan") || f.includes("payoff") || f.includes("statement"))
+    return "loan_statement";
+  if (f.includes("registration")) return "registration";
+  if (f.includes("invoice") || f.includes("receipt") || f.includes("service"))
+    return "service_record";
+  return "other";
 }

@@ -44,6 +44,10 @@ import type {
   RecallRecord,
   SubscriptionStatus,
   Task,
+  ThreadResponse,
+  ThreadItem,
+  ThreadEmailData,
+  ThreadEventData,
   UploadedDocument,
   Vehicle
 } from "./types";
@@ -652,6 +656,10 @@ function Product({ session }: { session: Session }) {
   // in flight, we switch to the History tab and auto-expand the relevant task
   // so they see the email thread immediately instead of having to hunt for it.
   const [historyAutoExpandTaskId, setHistoryAutoExpandTaskId] = useState<string | null>(null);
+  // Per-thread timeline modal — the drill-in from the home Agent Working strip
+  // and from "view conversation" links on Needs you cards. Shows the chronological
+  // union of task_emails + thread_events for a single task.
+  const [threadTaskId, setThreadTaskId] = useState<string | null>(null);
   // Just-in-time DL collection: when an insurance dispatch requires a DL we
   // hold the pending dispatch payload here and show DLPromptModal first. After
   // the user saves their DL we re-fetch the dispatch preview (now requires_dl=false)
@@ -659,8 +667,10 @@ function Product({ session }: { session: Session }) {
   const [pendingInsuranceDispatch, setPendingInsuranceDispatch] = useState<DispatchPayload | null>(null);
 
   function viewSentEmail(taskId: string) {
-    setHistoryAutoExpandTaskId(taskId);
-    setTab("history");
+    // Open the per-thread timeline modal. The substrate is the same for both
+    // "view what was sent" and "see the full conversation" — the modal renders
+    // a chronological merge of emails + agent events + user decisions.
+    setThreadTaskId(taskId);
   }
 
   /**
@@ -922,6 +932,13 @@ function Product({ session }: { session: Session }) {
         <DLPromptModal
           onClose={() => setPendingInsuranceDispatch(null)}
           onSaved={onDlCollected}
+        />
+      )}
+
+      {threadTaskId && (
+        <ThreadModal
+          taskId={threadTaskId}
+          onClose={() => setThreadTaskId(null)}
         />
       )}
 
@@ -2880,6 +2897,211 @@ function DispatchModal({
       </div>
     </div>
   );
+}
+
+// ============================================================
+// THREAD MODAL — chronological per-task timeline (drill-in from Home)
+// ============================================================
+//
+// Renders the union of task_emails + thread_events for a single task,
+// sorted oldest-first so the user reads top-to-bottom like a normal email
+// thread. Each item type has its own row component so the layout matches
+// what the item is (an email looks different from an agent decision).
+//
+// Backed by GET /api/threads/:taskId which returns { task, items } already
+// merged and sorted server-side.
+function ThreadModal({
+  taskId,
+  onClose
+}: {
+  taskId: string;
+  onClose: () => void;
+}) {
+  const [thread, setThread] = useState<ThreadResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setError(null);
+    api<ThreadResponse>(`/api/threads/${taskId}`)
+      .then((data) => {
+        if (!alive) return;
+        setThread(data);
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setError(err instanceof Error ? err.message : "Could not load thread");
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [taskId]);
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal thread-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <h2>{thread?.task?.title ?? "Conversation"}</h2>
+            {thread?.task && (
+              <p className="muted small">
+                {thread.task.task_type.replaceAll("_", " ")} ·{" "}
+                {thread.task.status.replaceAll("_", " ")}
+              </p>
+            )}
+          </div>
+          <button className="ghost icon-button" onClick={onClose} aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+
+        {loading && (
+          <div className="thin-status">
+            <Loader2 size={14} className="spinner" /> Loading conversation…
+          </div>
+        )}
+        {error && <div className="error">{error}</div>}
+
+        {thread && thread.items.length === 0 && (
+          <p className="muted small">
+            Nothing on the timeline yet. Activity will appear here as the agent acts and
+            providers reply.
+          </p>
+        )}
+
+        {thread && thread.items.length > 0 && (
+          <ul className="thread-timeline">
+            {thread.items.map((item, idx) => (
+              <ThreadItemRow key={`${item.kind}-${idx}-${item.at}`} item={item} />
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ThreadItemRow({ item }: { item: ThreadItem }) {
+  if (item.kind === "email_out" || item.kind === "email_in") {
+    return <ThreadEmail item={item.data as ThreadEmailData} />;
+  }
+  return <ThreadEvent kind={item.kind} data={item.data as ThreadEventData} />;
+}
+
+function ThreadEmail({ item }: { item: ThreadEmailData }) {
+  const [open, setOpen] = useState(false);
+  const isOutbound = item.direction === "outbound";
+  return (
+    <li className={`thread-item thread-email ${isOutbound ? "outbound" : "inbound"}`}>
+      <div className="thread-icon">
+        {isOutbound ? <Send size={14} /> : <Mail size={14} />}
+      </div>
+      <div className="thread-body">
+        <div className="thread-line">
+          <strong>
+            {isOutbound ? `Sent to ${item.to_email}` : `Reply from ${item.from_email}`}
+          </strong>
+          <span className="muted small">
+            {new Date(item.created_at).toLocaleString()}
+          </span>
+        </div>
+        <div className="thread-subject small">{item.subject}</div>
+        <button
+          className="ghost small inline-edit"
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+        >
+          {open ? "Hide message" : "Show message"}
+        </button>
+        {open && <pre className="thread-email-body">{item.body_text}</pre>}
+      </div>
+    </li>
+  );
+}
+
+function ThreadEvent({
+  kind,
+  data
+}: {
+  kind: string;
+  data: ThreadEventData;
+}) {
+  const meta = data.metadata ?? {};
+  const className = (meta as any)?.class as string | undefined;
+  const isFallback = (meta as any)?.fallback === true;
+
+  return (
+    <li className={`thread-item thread-event thread-event-${kind}`}>
+      <div className="thread-icon">{iconForThreadEventKind(kind)}</div>
+      <div className="thread-body">
+        <div className="thread-line">
+          <strong>{labelForThreadEventKind(kind)}</strong>
+          <span className="muted small">
+            {new Date(data.created_at).toLocaleString()}
+          </span>
+        </div>
+        <div className="small">{data.summary}</div>
+        {data.detail && (
+          <p className="small muted thread-event-detail">{data.detail}</p>
+        )}
+        {className && (
+          <span className={`thread-class thread-class-${className}`}>
+            {className.replaceAll("_", " ")}
+            {isFallback && " (fallback)"}
+          </span>
+        )}
+      </div>
+    </li>
+  );
+}
+
+function iconForThreadEventKind(kind: string) {
+  switch (kind) {
+    case "agent_classification":
+      return <Sparkles size={14} />;
+    case "agent_decision":
+    case "agent_action":
+      return <Send size={14} />;
+    case "state_transition":
+      return <ChevronRight size={14} />;
+    case "document_attached":
+      return <FileImage size={14} />;
+    case "user_decision":
+      return <CheckCircle2 size={14} />;
+    case "user_note":
+      return <Info size={14} />;
+    case "system":
+    default:
+      return <Info size={14} />;
+  }
+}
+
+function labelForThreadEventKind(kind: string): string {
+  switch (kind) {
+    case "agent_classification":
+      return "Agent classified reply";
+    case "agent_decision":
+      return "Agent decided";
+    case "agent_action":
+      return "Agent acted";
+    case "state_transition":
+      return "State changed";
+    case "document_attached":
+      return "Document attached";
+    case "user_decision":
+      return "You decided";
+    case "user_note":
+      return "Your note";
+    case "system":
+      return "System";
+    default:
+      return kind.replaceAll("_", " ");
+  }
 }
 
 // ============================================================

@@ -5,6 +5,7 @@ import { env } from "./config.js";
 import { router } from "./routes.js";
 import { webhooks } from "./webhooks.js";
 import { mcpRouter } from "./mcp/server.js";
+import { startDailyRecallsJob } from "./jobs/daily-recalls.js";
 
 const app = express();
 
@@ -51,4 +52,7 @@ app.use(router);
 
 app.listen(env.PORT, () => {
   console.log(`Automoteev API listening on ${env.PORT}`);
+  // Start the daily recall recheck cron once the server is accepting traffic.
+  // First run is delayed 60s so health checks pass on cold boot.
+  startDailyRecallsJob();
 });
