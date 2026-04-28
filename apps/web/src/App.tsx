@@ -18,6 +18,7 @@ import {
   LogOut,
   Mail,
   MapPin,
+  Paperclip,
   Phone,
   Plus,
   Send,
@@ -40,6 +41,7 @@ import type {
   Insight,
   MaintenanceItem,
   PendingAction,
+  PlannedAttachment,
   Provider,
   RecallRecord,
   SubscriptionStatus,
@@ -691,6 +693,7 @@ function Product({ session }: { session: Session }) {
         providers: DispatchProvider[];
         preferred_provider_id: string | null;
         email_preview: { subject: string; body: string };
+        planned_attachments?: PlannedAttachment[];
         requires_dl?: boolean;
       }>(`/api/tasks/${taskId}/dispatch-preview`);
       const payload: DispatchPayload = {
@@ -698,6 +701,7 @@ function Product({ session }: { session: Session }) {
         providers: result.providers,
         preferred_provider_id: result.preferred_provider_id,
         email_preview: result.email_preview,
+        planned_attachments: result.planned_attachments ?? [],
         requires_dl: result.requires_dl
       };
       if (result.requires_dl) {
@@ -770,6 +774,7 @@ function Product({ session }: { session: Session }) {
         providers?: DispatchProvider[];
         preferred_provider_id?: string | null;
         email_preview?: { subject: string; body: string };
+        planned_attachments?: PlannedAttachment[];
         already_existed?: boolean;
       }>("/api/insights/act", {
         method: "POST",
@@ -782,6 +787,7 @@ function Product({ session }: { session: Session }) {
           providers: result.providers,
           preferred_provider_id: result.preferred_provider_id ?? null,
           email_preview: result.email_preview,
+          planned_attachments: result.planned_attachments ?? [],
           already_existed: result.already_existed,
           requires_dl: (result as any).requires_dl
         };
@@ -3146,6 +3152,20 @@ function DispatchModal({
           </button>
           {showEmailBody && (
             <pre className="email-body">{payload.email_preview.body}</pre>
+          )}
+          {payload.planned_attachments.length > 0 && (
+            // Surface what will ride along with the email so the user knows
+            // what's being sent before tapping Send. The agent picked these
+            // by category (dec page on insurance, registration on sale, etc.)
+            // — the user can opt out by skipping the upload, but per-attachment
+            // toggling isn't a v1 feature.
+            <div className="email-attachments-line small">
+              <Paperclip size={12} />
+              <span className="muted">Will include:</span>{" "}
+              <span>
+                {payload.planned_attachments.map((a) => a.filename).join(", ")}
+              </span>
+            </div>
           )}
         </div>
 

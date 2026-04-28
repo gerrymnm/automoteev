@@ -372,6 +372,166 @@ export async function applyExtractedDocument(params: {
   return { applied, data };
 }
 
+/**
+ * Maps a dispatchable task type to the document categories the agent should
+ * try to attach to outbound provider emails. The mapping is intentionally
+ * conservative — only attach what the receiving party genuinely needs to
+ * issue a quote / process the request:
+ *
+ *   insurance_quote: dec page (current coverage) + DL (binding requirement)
+ *   refinance:       loan statement (balance/APR/payoff) + registration
+ *   sell_vehicle:    registration + prior sale paperwork (proof of ownership)
+ *   recall_repair / recall_appointment / service_quote: text-only
+ */
+export function attachmentCategoriesForTask(taskType: string): DocumentCategory[] {
+  switch (taskType) {
+    case "insurance_quote":
+    case "insurance_review":
+      return ["insurance", "identity"];
+    case "refinance":
+    case "refinance_review":
+    case "payoff_request":
+    case "payoff_quote":
+      return ["loan", "registration"];
+    case "sell_vehicle":
+    case "lease_end_review":
+      return ["registration", "sale"];
+    default:
+      return [];
+  }
+}
+
+export interface PlannedAttachment {
+  document_id: string;
+  filename: string;
+  document_kind: DocumentKind;
+  category: DocumentCategory;
+  byte_size: number;
+}
+
+export interface ResolvedAttachment {
+  filename: string;
+  content_base64: string;
+  content_type: string;
+  document_id: string;
+  category: DocumentCategory;
+}
+
+/**
+ * For each category the task wants to attach, return the most-recently-uploaded
+ * successfully-extracted document. Returns lightweight metadata only — use
+ * `resolveAttachmentsForDispatch` to actually download the bytes when sending.
+ *
+ * Identity (DL) docs are user-scoped (vehicle_id IS NULL); other categories
+ * are vehicle-scoped. We never attach a doc whose extraction_status isn't
+ * 'completed' — if the agent can't read the file, the receiving party
+ * probably can't either, and a half-uploaded file is worse than none.
+ */
+export async function planAttachmentsForDispatch(params: {
+  userId: string;
+  vehicleId: string;
+  taskType: string;
+}): Promise<PlannedAttachment[]> {
+  const categories = attachmentCategoriesForTask(params.taskType);
+  if (categories.length === 0) return [];
+
+  const planned: PlannedAttachment[] = [];
+  for (const category of categories) {
+    let query = supabaseAdmin
+      .from("uploaded_documents")
+      .select(
+        "id, file_name, mime_type, document_kind, category, byte_size, vehicle_id, user_id, extraction_status"
+      )
+      .eq("category", category)
+      .eq("extraction_status", "completed")
+      .order("uploaded_at", { ascending: false })
+      .limit(1);
+
+    if (category === "identity") {
+      // DL is user-scoped, not vehicle-scoped. The orphan-no-vehicle row is
+      // exactly the one we want.
+      query = query.eq("user_id", params.userId).is("vehicle_id", null);
+    } else {
+      query = query.eq("vehicle_id", params.vehicleId);
+    }
+
+    const { data, error } = await query.maybeSingle();
+    if (error) {
+      console.warn(
+        `[documents] planAttachmentsForDispatch ${category} lookup failed`,
+        error
+      );
+      continue;
+    }
+    if (!data) continue;
+
+    planned.push({
+      document_id: data.id,
+      filename: data.file_name,
+      document_kind: data.document_kind as DocumentKind,
+      category: data.category as DocumentCategory,
+      byte_size: data.byte_size as number
+    });
+  }
+  return planned;
+}
+
+/**
+ * Take a planned-attachment list and download each from Storage, returning
+ * base64-encoded bytes ready for Resend. Skips any document whose download
+ * fails so a transient storage hiccup doesn't block the whole dispatch.
+ *
+ * Total-size budget: 30MB combined. Resend's hard cap is 40MB; we leave
+ * headroom for the body + headers + base64 expansion overhead.
+ */
+export async function resolveAttachmentsForDispatch(
+  planned: PlannedAttachment[]
+): Promise<ResolvedAttachment[]> {
+  if (planned.length === 0) return [];
+  const MAX_TOTAL_BYTES = 30 * 1024 * 1024;
+  let totalBytes = 0;
+  const resolved: ResolvedAttachment[] = [];
+
+  for (const p of planned) {
+    if (totalBytes + p.byte_size > MAX_TOTAL_BYTES) {
+      console.warn(
+        `[documents] skipping attachment ${p.filename} — would exceed 30MB cap`
+      );
+      continue;
+    }
+
+    const { data: row } = await supabaseAdmin
+      .from("uploaded_documents")
+      .select("storage_path, mime_type")
+      .eq("id", p.document_id)
+      .maybeSingle();
+    if (!row?.storage_path) continue;
+
+    const { data: blob, error: dlErr } = await supabaseAdmin.storage
+      .from(STORAGE_BUCKET)
+      .download(row.storage_path);
+    if (dlErr || !blob) {
+      console.warn(
+        `[documents] attachment download failed for ${p.filename}`,
+        dlErr?.message
+      );
+      continue;
+    }
+    const arrayBuffer = await blob.arrayBuffer();
+    const base64 = Buffer.from(arrayBuffer).toString("base64");
+
+    resolved.push({
+      filename: p.filename,
+      content_base64: base64,
+      content_type: (row.mime_type as string) || "application/octet-stream",
+      document_id: p.document_id,
+      category: p.category
+    });
+    totalBytes += p.byte_size;
+  }
+  return resolved;
+}
+
 function promptForKind(kind: DocumentKind): string {
   switch (kind) {
     case "insurance_dec_page":

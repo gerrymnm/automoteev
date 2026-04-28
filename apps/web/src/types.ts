@@ -136,11 +136,41 @@ export interface DispatchProvider extends Provider {
   community_success_count?: number | null;
 }
 
+/**
+ * Lightweight metadata for a document the agent plans to attach to the
+ * outbound provider email. Surfaced to the dispatch modal so the user sees
+ * what's being sent before tapping Send. Bytes are NOT included here —
+ * they're resolved server-side at send time.
+ */
+export interface PlannedAttachment {
+  document_id: string;
+  filename: string;
+  document_kind:
+    | "insurance_dec_page"
+    | "loan_statement"
+    | "lease_agreement"
+    | "registration"
+    | "recall_notice"
+    | "service_record"
+    | "sale_paperwork"
+    | "drivers_license"
+    | "other";
+  category: DocumentCategory;
+  byte_size: number;
+}
+
 export interface DispatchPayload {
   task: Task;
   providers: DispatchProvider[];
   preferred_provider_id: string | null;
   email_preview: { subject: string; body: string };
+  /**
+   * Documents that will be attached to the outbound email — dec page on
+   * insurance, loan statement on refinance, registration on sale outreach.
+   * Empty array when the task type doesn't take attachments or when the
+   * user hasn't uploaded the relevant docs yet.
+   */
+  planned_attachments: PlannedAttachment[];
   already_existed?: boolean;
   /** True if a DL must be collected before this task can dispatch (insurance only). */
   requires_dl?: boolean;

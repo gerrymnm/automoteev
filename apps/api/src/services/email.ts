@@ -3,6 +3,17 @@ import { env } from "../config.js";
 
 const resend = env.RESEND_API_KEY ? new Resend(env.RESEND_API_KEY) : null;
 
+/**
+ * Single attachment for a Resend email. content is base64-encoded bytes
+ * (Resend accepts that directly). Keep filename + content_type so the
+ * receiving inbox renders it as a normal attachment, not a text blob.
+ */
+export interface TaskEmailAttachment {
+  filename: string;
+  content_base64: string;
+  content_type: string;
+}
+
 export interface SendTaskEmailParams {
   to: string;
   fromLocal: string;      // per-user alias, e.g. "gerry.m"
@@ -14,6 +25,12 @@ export interface SendTaskEmailParams {
     inReplyTo?: string;
     references?: string[];
   };
+  /**
+   * Files to attach to this email — dec page on insurance quotes, loan
+   * statement on refinance, registration on sale outreach, etc. Composed
+   * upstream by selectAttachmentsForDispatch in documents.ts.
+   */
+  attachments?: TaskEmailAttachment[];
 }
 
 export interface SendTaskEmailResult {
@@ -44,6 +61,15 @@ export async function sendTaskEmail(params: SendTaskEmailParams): Promise<SendTa
     headers["References"] = params.threadHeaders.references.join(" ");
   }
 
+  // Resend wants attachments as { filename, content }. content can be a
+  // base64 string OR a Buffer; we standardize on base64 since the storage
+  // download path returns it that way and we keep the wire format stable.
+  const resendAttachments = (params.attachments ?? []).map((a) => ({
+    filename: a.filename,
+    content: a.content_base64,
+    content_type: a.content_type
+  }));
+
   try {
     const result = await resend.emails.send({
       from,
@@ -51,7 +77,8 @@ export async function sendTaskEmail(params: SendTaskEmailParams): Promise<SendTa
       subject: params.subject,
       text: params.body,
       reply_to: replyTo,
-      headers
+      headers,
+      ...(resendAttachments.length ? { attachments: resendAttachments } : {})
     });
 
     if (result.error) {

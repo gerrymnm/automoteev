@@ -2117,3 +2117,20 @@ label.checkbox-row a {
 .document-item .muted {
   margin-left: auto;
 }
+
+/* ============================================================
+   DISPATCH MODAL — "Will include" attachment line under email preview
+   ============================================================ */
+.email-attachments-line {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #e5e5e5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  color: #444;
+}
+.email-attachments-line svg {
+  flex-shrink: 0;
+}

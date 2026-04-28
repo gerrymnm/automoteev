@@ -15,7 +15,10 @@ import {
   uploadDocument,
   extractDocument,
   applyExtractedDocument,
-  type DocumentKind
+  planAttachmentsForDispatch,
+  resolveAttachmentsForDispatch,
+  type DocumentKind,
+  type PlannedAttachment
 } from "./services/documents.js";
 import {
   maintenanceDue,
@@ -2536,6 +2539,15 @@ async function buildDispatchPayload(
     providers,
     preferred_provider_id: (compatiblePreferred as any)?.id ?? null,
     email_preview: { subject, body },
+    // Documents that will ride along with the outbound email — dec page on
+    // insurance, loan statement on refinance, registration on sale outreach.
+    // Surfaced to the dispatch UI so the user sees what's being sent before
+    // tapping Send. The actual bytes are resolved at send time, not here.
+    planned_attachments: await planAttachmentsForDispatch({
+      userId,
+      vehicleId: vehicle.id,
+      taskType
+    }),
     // Insurance providers need a DL number/state to issue a real quote.
     // Surface this to the frontend so the UI can collect it before dispatch
     // instead of bouncing the user halfway through. Only insurance_quote
@@ -2710,6 +2722,15 @@ router.post("/api/tasks/:id/dispatch", async (req, res) => {
     });
 
   // Send to each provider that has an email. Track skips for the response.
+  // Resolve any planned attachments ONCE here — same bytes go to every
+  // recipient, so we don't re-download per provider.
+  const plannedAttachments = await planAttachmentsForDispatch({
+    userId: req.user!.id,
+    vehicleId: (task as any).vehicle_id,
+    taskType: taskTypeForEmail
+  });
+  const resolvedAttachments = await resolveAttachmentsForDispatch(plannedAttachments);
+
   let sent = 0;
   const skipped: Array<{ provider_id: string; reason: string }> = [];
   const sentLogs: any[] = [];
@@ -2724,7 +2745,14 @@ router.post("/api/tasks/:id/dispatch", async (req, res) => {
         fromLocal: (profile as any).agent_email_local,
         fromDisplayName: (profile as any).full_name,
         subject,
-        body: text
+        body: text,
+        attachments: resolvedAttachments.length
+          ? resolvedAttachments.map((a) => ({
+              filename: a.filename,
+              content_base64: a.content_base64,
+              content_type: a.content_type
+            }))
+          : undefined
       });
       const { data: log } = await req
         .db!.from("task_emails")
@@ -2777,8 +2805,17 @@ router.post("/api/tasks/:id/dispatch", async (req, res) => {
     taskId,
     vehicleId: (task as any).vehicle_id,
     eventType: "task_dispatched",
-    summary: `Dispatched to ${sent} provider${sent === 1 ? "" : "s"}${skipped.length ? `, ${skipped.length} skipped` : ""}${preferred_id ? ", preferred saved" : ""}`,
-    metadata: { sent, skipped, preferred_id }
+    summary: `Dispatched to ${sent} provider${sent === 1 ? "" : "s"}${skipped.length ? `, ${skipped.length} skipped` : ""}${preferred_id ? ", preferred saved" : ""}${resolvedAttachments.length ? `, ${resolvedAttachments.length} attachment${resolvedAttachments.length === 1 ? "" : "s"}` : ""}`,
+    metadata: {
+      sent,
+      skipped,
+      preferred_id,
+      attachments: resolvedAttachments.map((a) => ({
+        document_id: a.document_id,
+        filename: a.filename,
+        category: a.category
+      }))
+    }
   });
 
   return res.status(200).json({
