@@ -1932,3 +1932,37 @@ label.checkbox-row a {
   .thread-modal { max-height: 92vh; }
   .thread-item { padding: 8px 10px; }
 }
+
+/* ============================================================
+   CURRENT-PROVIDER ANNOTATION (dispatch modal)
+   ============================================================ */
+.dealer-row.current-provider {
+  border-color: #e3c97a;
+  background: linear-gradient(180deg, #fdf7e6 0%, #ffffff 60%);
+}
+.current-provider-badge {
+  display: inline-block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #f3e9d3;
+  color: #826015;
+  margin-left: 6px;
+  font-weight: 600;
+}
+.current-provider-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  color: #5a4310;
+  background: #faf3e0;
+  border: 1px solid #e8d8a8;
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin: 6px 0;
+  line-height: 1.4;
+}
+.current-provider-note svg { flex-shrink: 0; margin-top: 2px; }

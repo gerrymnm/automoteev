@@ -36,6 +36,7 @@ import { taskEmailBody, taskEmailSubject } from "./services/emailTemplates.js";
 import { createProCheckoutSession } from "./services/stripe.js";
 import { searchProviders } from "./services/places.js";
 import { discoverProvidersForTask, isDispatchable, type DispatchableTaskType } from "./services/dealer-discovery.js";
+import { detectCurrentProviders } from "./services/current-provider.js";
 import { pickProviderEmailForDept, taskTypeToContactDept } from "./services/contacts.js";
 import { subscribePush, unsubscribePush, sendPushToUser } from "./services/push.js";
 import { getGasPrice, getMaintenanceCost } from "./services/market.js";
@@ -2258,6 +2259,33 @@ async function buildDispatchPayload(
       },
       ...providers
     ];
+  }
+
+  // Annotate any provider that matches the user's CURRENT lender / carrier
+  // so the dispatch UI can render a "this is who you already use" banner
+  // instead of cold-emailing them. This addresses a real failure mode where
+  // refinance recommendations would surface the user's own lender as a
+  // "discovery" — making the agent look uninformed.
+  const currentMap = await detectCurrentProviders({
+    userId,
+    vehicleId: vehicle.id,
+    taskType,
+    candidates: providers.map((p) => ({ id: p.id, name: p.name }))
+  });
+  if (currentMap.size > 0) {
+    providers = providers.map((p) => {
+      const ann = currentMap.get(p.id);
+      if (!ann) return p;
+      return {
+        ...p,
+        is_current_provider: true,
+        current_provider_note: ann.current_provider_note ?? null
+      };
+    });
+    // Float current providers to the top so the user sees the context first.
+    providers.sort((a, b) =>
+      (b.is_current_provider ? 1 : 0) - (a.is_current_provider ? 1 : 0)
+    );
   }
 
   const vehicleName =

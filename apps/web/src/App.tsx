@@ -2638,8 +2638,14 @@ function DispatchModal({
   onClose: () => void;
   onSent: () => void;
 }) {
+  // Default-select providers that have an email AND are NOT the user's current
+  // provider. Current-provider rows are deliberately deselected so we don't
+  // cold-blast someone the user already has a relationship with — the user
+  // can re-tick them if they want to include with a manual contact override.
   const initialSelected = new Set(
-    payload.providers.filter((p) => Boolean(p.email)).map((p) => p.id)
+    payload.providers
+      .filter((p) => Boolean(p.email) && !p.is_current_provider)
+      .map((p) => p.id)
   );
   const [selected, setSelected] = useState<Set<string>>(initialSelected);
   const [preferredId, setPreferredId] = useState<string | null>(
@@ -2751,7 +2757,7 @@ function DispatchModal({
             return (
               <div
                 key={p.id}
-                className={`dealer-row ${isSelected ? "selected" : ""} ${isPreferred ? "preferred" : ""} ${!hasEmail ? "no-email" : ""}`}
+                className={`dealer-row ${isSelected ? "selected" : ""} ${isPreferred ? "preferred" : ""} ${!hasEmail ? "no-email" : ""} ${p.is_current_provider ? "current-provider" : ""}`}
               >
                 {hasEmail ? (
                   <button
@@ -2773,6 +2779,11 @@ function DispatchModal({
                 <div className="dealer-info">
                   <div className="dealer-name">
                     <strong>{p.name}</strong>
+                    {p.is_current_provider && (
+                      <span className="current-provider-badge" title="Your current provider">
+                        Your current provider
+                      </span>
+                    )}
                     {p.distance_miles != null && (
                       <span className="dealer-distance" title="Distance from your ZIP">
                         <MapPin size={12} /> {formatDistance(p.distance_miles)}
@@ -2792,6 +2803,11 @@ function DispatchModal({
                       </span>
                     )}
                   </div>
+                  {p.is_current_provider && p.current_provider_note && (
+                    <div className="current-provider-note">
+                      <Info size={12} /> {p.current_provider_note}
+                    </div>
+                  )}
                   {p.location && (
                     <div className="dealer-meta">
                       <MapPin size={12} /> <span className="small muted">{p.location}</span>

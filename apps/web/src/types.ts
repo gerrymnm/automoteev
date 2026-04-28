@@ -125,6 +125,12 @@ export interface DispatchProvider extends Provider {
   website?: string | null;
   /** Distance from user's ZIP, in miles. Null if user ZIP isn't geocodable. */
   distance_miles?: number | null;
+  /** True when this provider is the user's CURRENT lender / insurer / etc.
+   * Surfaces a banner in the dispatch modal explaining why they're shown
+   * and prompting for an existing contact rather than blasting cold. */
+  is_current_provider?: boolean;
+  /** Human-readable explanation paired with is_current_provider. */
+  current_provider_note?: string | null;
 }
 
 export interface DispatchPayload {
