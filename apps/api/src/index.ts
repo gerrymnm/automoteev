@@ -6,6 +6,7 @@ import { router } from "./routes.js";
 import { webhooks } from "./webhooks.js";
 import { mcpRouter } from "./mcp/server.js";
 import { startDailyRecallsJob } from "./jobs/daily-recalls.js";
+import { startDailyRenewalRemindersJob } from "./jobs/daily-renewal-reminders.js";
 
 const app = express();
 
@@ -55,4 +56,8 @@ app.listen(env.PORT, () => {
   // Start the daily recall recheck cron once the server is accepting traffic.
   // First run is delayed 60s so health checks pass on cold boot.
   startDailyRecallsJob();
+  // Daily renewal reminder cron — fires push notifications at 30/14/7/1/0
+  // day thresholds before each renewable item's expiration. Offset 30s
+  // after daily-recalls (so 90s after boot) to avoid event-loop contention.
+  startDailyRenewalRemindersJob();
 });

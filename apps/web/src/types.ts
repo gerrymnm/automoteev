@@ -391,7 +391,8 @@ export type PendingActionKind =
   | "confirm_close"
   | "review_quotes"
   | "approval"
-  | "manual";
+  | "manual"
+  | "renewal";
 
 export interface PendingActionOption {
   id: string;
@@ -400,6 +401,20 @@ export interface PendingActionOption {
   /** Optional href for option-style links (e.g. "View PDF"). */
   href?: string;
 }
+
+/**
+ * Action a renewal card's CTA button takes when tapped. Three flavors today:
+ *   shop_replacement — dispatch flow for insurance_quote (only insurance has
+ *                       a real shop-replacement pipeline)
+ *   open_external    — navigate the user to a URL (DMV for DL/registration
+ *                       since the agent can't legally renew those)
+ *   edit_renewal     — open the RenewalFormModal (default for warranties /
+ *                       memberships / subscriptions)
+ */
+export type RenewalCtaAction =
+  | { type: "shop_replacement"; task_type: "insurance_quote" }
+  | { type: "open_external"; url: string; label: string }
+  | { type: "edit_renewal" };
 
 export interface PendingAction {
   task_id: string | null;
@@ -415,6 +430,15 @@ export interface PendingAction {
   synthetic?: boolean;
   insight_key?: string;
   cta_label?: string;
+  // ---- Renewal cards only (kind === "renewal") ----
+  /** The renewable_items.id this card is anchored to. */
+  renewable_item_id?: string;
+  /** What action the CTA should perform. */
+  cta_action?: RenewalCtaAction;
+  /** True when expires_at < today. Drives red badge on the card. */
+  is_expired?: boolean;
+  /** Negative if expired, null if mileage-only. */
+  days_until_expiration?: number | null;
 }
 
 export interface AgentWorkingItem {

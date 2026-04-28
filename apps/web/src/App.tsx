@@ -1366,6 +1366,25 @@ function NeedsMeCard({
   const insightBusy = insight ? actBusyKey === insight.key : false;
   const dispatchBusy = action.task_id ? openingDispatchTaskId === action.task_id : false;
 
+  // Snooze a renewal card. Reuses the dismissed_insights table via the
+  // backend filter on insight_key=`renewal:<id>` so the card stays gone
+  // for the same 7-day TTL as other dismissals.
+  async function snoozeRenewal(insightKey: string, vehicleId: string) {
+    setDismissBusy(true);
+    setError(null);
+    try {
+      await api("/api/insights/dismiss", {
+        method: "POST",
+        body: JSON.stringify({ insight_key: insightKey, vehicle_id: vehicleId })
+      });
+      onDismissed();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not snooze.");
+    } finally {
+      setDismissBusy(false);
+    }
+  }
+
   async function answerOption(optionId: string) {
     if (!action.task_id) return;
     setBusy(true);
@@ -1384,6 +1403,100 @@ function NeedsMeCard({
     } finally {
       setBusy(false);
     }
+  }
+
+  // Renewal cards — driven by the renewal_items insights pipeline. The card
+  // shows the kind icon, expiration urgency in the title ("EXPIRED:" or
+  // "expires in Xd"), and a CTA whose action depends on the kind:
+  //   - insurance_policy → shop_replacement (opens dispatch flow)
+  //   - drivers_license / vehicle_registration → open_external (DMV)
+  //   - everything else → edit_renewal (opens edit modal — not implemented
+  //     here yet; falls back to no-op for now since the panel below offers
+  //     the same affordance)
+  if (action.kind === "renewal") {
+    const cta = action.cta_action;
+    const ctaLabel = action.cta_label ?? "Update";
+    return (
+      <article className={`needs-me-card ${action.is_expired ? "renewal-card-expired" : ""}`}>
+        <div className="needs-me-icon">
+          {action.is_expired ? <AlertTriangle size={18} /> : <Clock3 size={18} />}
+        </div>
+        <div className="needs-me-body">
+          <h3 className="needs-me-title">{action.title}</h3>
+          {action.body && <p className="small">{action.body}</p>}
+          {error && <div className="error small">{error}</div>}
+        </div>
+        <div className="needs-me-actions">
+          {cta?.type === "open_external" ? (
+            <a
+              className="primary"
+              href={cta.url}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {ctaLabel} <ExternalLink size={14} />
+            </a>
+          ) : cta?.type === "shop_replacement" ? (
+            <button
+              className="primary"
+              type="button"
+              onClick={() => {
+                // Synthesize an Insight-shaped object so onActOnInsight can
+                // route this through the existing pipeline (creates a
+                // task, opens DispatchModal). The category is fabricated
+                // since renewals don't have one in the AutonomyCategoryName
+                // union — "insurance" matches what the underlying task
+                // creation will use.
+                const fauxInsight: Insight = {
+                  key: action.insight_key ?? `renewal:${action.renewable_item_id}`,
+                  category: "insurance",
+                  severity: "urgent",
+                  title: action.title,
+                  body: action.body ?? "",
+                  cta_label: ctaLabel,
+                  action: {
+                    type: "create_task",
+                    task_type: cta.task_type,
+                    category: "insurance",
+                    task_title: "Get insurance quotes (renewal coming up)"
+                  }
+                };
+                onActOnInsight(fauxInsight);
+              }}
+              disabled={insightBusy || dismissBusy}
+            >
+              {ctaLabel} <ChevronRight size={14} />
+            </button>
+          ) : (
+            // edit_renewal default — we don't have a direct hook to open the
+            // RenewalFormModal from here (it's owned by RenewalsPanel).
+            // Snooze is the safe action; the user can edit from the panel.
+            <button
+              className="primary"
+              type="button"
+              onClick={() =>
+                action.insight_key &&
+                snoozeRenewal(action.insight_key, action.vehicle_id)
+              }
+              disabled={dismissBusy}
+            >
+              {dismissBusy ? <Loader2 size={14} className="spinner" /> : "OK"}
+            </button>
+          )}
+          <button
+            className="ghost"
+            type="button"
+            onClick={() =>
+              action.insight_key &&
+              snoozeRenewal(action.insight_key, action.vehicle_id)
+            }
+            disabled={dismissBusy}
+          >
+            {dismissBusy ? <Loader2 size={14} className="spinner" /> : "Not now"}
+          </button>
+        </div>
+      </article>
+    );
   }
 
   // Synthetic insight cards — the most common today.

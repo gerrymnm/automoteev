@@ -59,6 +59,7 @@ import {
   type RenewableKind,
   type CostPeriod
 } from "./services/renewals.js";
+import { getRenewalCardsForHome } from "./services/renewals-insights.js";
 import {
   getAutonomyState,
   recordApprovedSend,
@@ -1052,7 +1053,25 @@ router.get("/api/home", async (req, res) => {
       cta_label: "Approve & contact providers"
     }));
 
-  const allPending = [...pendingActions, ...syntheticPending, ...approvalPending];
+  // ---- Renewal cards ----
+  // Pull due-soon and expired renewable items, render as cards on the
+  // Home Needs You stack. Same dismissed-insights filter applies via the
+  // insight_key prefix `renewal:<id>`. Renewals slot in AFTER explicit
+  // pending actions and approval-required tasks (those are time-critical
+  // by definition) but BEFORE pure recommendation insights, since a
+  // missed renewal is more damaging than a missed savings opportunity.
+  const renewalCards = await getRenewalCardsForHome(userId);
+  const visibleRenewalCards = renewalCards.filter(
+    (c) => !dismissedKeys.has(c.insight_key)
+  );
+  // Insert before approvalPending so renewals get badge priority over
+  // dispatch-approval reminders that aren't time-critical.
+  const allPendingWithRenewals = [
+    ...pendingActions,
+    ...syntheticPending,
+    ...visibleRenewalCards,
+    ...approvalPending
+  ];
 
   // -------- Agent working: tasks with no pending action that the agent is on --
   const { data: agentWorkingTasks } = await req
@@ -1092,7 +1111,7 @@ router.get("/api/home", async (req, res) => {
   }, 0);
 
   return res.json({
-    pending_actions: allPending,
+    pending_actions: allPendingWithRenewals,
     agent_working: agentWorking,
     // Recommended/info insights live here — secondary, not on the main stack.
     secondary_recommendations: visibleInsights.filter((i) => i.severity !== "urgent"),
@@ -1575,6 +1594,7 @@ router.post("/api/jobs/:jobName/run", async (req, res) => {
   const jobName = z
     .enum([
       "daily-recalls",
+      "daily-renewal-reminders",
       "insurance-renewals",
       "lease-maturity",
       "maintenance-due",
@@ -1582,6 +1602,23 @@ router.post("/api/jobs/:jobName/run", async (req, res) => {
       "onboarding-nudges"
     ])
     .parse(req.params.jobName);
+
+  // For jobs that have real implementations, run them inline so smoke tests
+  // and Gerry's local triggering both work. The rest stay placeholders.
+  if (jobName === "daily-renewal-reminders") {
+    const { runDailyRenewalReminders } = await import(
+      "./services/renewals-insights.js"
+    );
+    const result = await runDailyRenewalReminders();
+    await audit({
+      userId: req.user!.id,
+      eventType: "job_run",
+      summary: `Ran ${jobName}: sent=${result.sent} skipped=${result.skipped} errors=${result.errors}`,
+      metadata: result
+    });
+    return res.json({ ok: true, job: jobName, mode: "executed", ...result });
+  }
+
   await audit({
     userId: req.user!.id,
     eventType: "job_placeholder_run",

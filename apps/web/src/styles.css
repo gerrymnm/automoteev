@@ -2261,3 +2261,10 @@ label.checkbox-row a {
   cursor: pointer;
   padding: 4px 0;
 }
+
+/* Expired-renewal card on the Needs You stack: red left border + faint pink
+   wash so the card is visibly more urgent than other pending items. */
+.needs-me-card.renewal-card-expired {
+  border-left: 3px solid #c44;
+  background: #fef9f9;
+}

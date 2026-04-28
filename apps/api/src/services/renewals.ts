@@ -333,3 +333,103 @@ export async function dismissRenewal(params: {
     .eq("id", params.itemId);
   return { ok: !error, dismissed_until: dismissedUntil };
 }
+
+/**
+ * How long a fresh renewal lasts, by kind. When the user taps "Mark
+ * renewed" we extend expires_at by this many days. Conservative defaults;
+ * subscriptions use the row's cost_period to pick a sensible window.
+ *
+ * For DL / registration / warranty kinds the actual term is jurisdiction-
+ * or policy-specific (CA DL is 5y, some states are 4y or 8y) — we use
+ * the most common case and let the user PATCH if it's wrong.
+ */
+export function defaultRenewalTermDays(
+  kind: RenewableKind,
+  costPeriod: CostPeriod | null
+): number {
+  switch (kind) {
+    case "drivers_license":
+      return 5 * 365;
+    case "vehicle_registration":
+      return 365;
+    case "insurance_policy":
+      return 180; // 6mo policies are most common; user can edit if 12mo
+    case "vehicle_warranty_basic":
+    case "vehicle_warranty_powertrain":
+      return 3 * 365;
+    case "extended_warranty":
+    case "prepaid_maintenance":
+      return 365;
+    case "gap_insurance":
+    case "tire_protection":
+    case "roadside_assistance":
+    case "aaa_membership":
+    case "membership":
+      return 365;
+    case "subscription":
+      // Most subscriptions are monthly or annual. Pull from cost_period
+      // if we have it; default to monthly which is the safer assumption
+      // for a subscription with no period set.
+      if (costPeriod === "annual" || costPeriod === "biennial") {
+        return costPeriod === "biennial" ? 730 : 365;
+      }
+      return 30;
+    default:
+      return 365;
+  }
+}
+
+/**
+ * Mark a renewable item as renewed. Pushes expires_at out by the
+ * kind-appropriate term and clears any active dismissal so the renewed
+ * item shows up cleanly in the list (now far future, no badge).
+ *
+ * Returns the updated row, or null if the item wasn't found.
+ */
+export async function markRenewed(params: {
+  userId: string;
+  itemId: string;
+}): Promise<RenewableItem | null> {
+  const { data: existing } = await supabaseAdmin
+    .from("renewable_items")
+    .select("*")
+    .eq("user_id", params.userId)
+    .eq("id", params.itemId)
+    .maybeSingle();
+  if (!existing) return null;
+
+  const row = existing as RenewableItem;
+  const termDays = defaultRenewalTermDays(row.kind, row.cost_period);
+
+  // Extend from today, not from old expires_at — if the item already
+  // expired, we don't want to land in the past. "Marked renewed today"
+  // means the new period starts today.
+  const newExpiresAt = new Date(Date.now() + termDays * 86_400_000)
+    .toISOString()
+    .slice(0, 10); // YYYY-MM-DD
+
+  const { data: updated } = await supabaseAdmin
+    .from("renewable_items")
+    .update({
+      expires_at: newExpiresAt,
+      dismissed_until: null
+    })
+    .eq("id", params.itemId)
+    .select()
+    .single();
+
+  return (updated as RenewableItem) ?? null;
+}
+
+/**
+ * The reminder ladder — how far ahead of expiration we send progressive
+ * push notifications. Each tier fires once and only once per renewable
+ * item, tracked via the audit log so the cron is idempotent across
+ * re-runs and crash-recoveries.
+ *
+ * 30d = first heads-up, plenty of time to act
+ *  7d = real urgency
+ *  1d = last call
+ */
+export const REMINDER_TIERS_DAYS = [30, 7, 1] as const;
+export type ReminderTierDays = (typeof REMINDER_TIERS_DAYS)[number];
