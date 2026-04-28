@@ -1966,3 +1966,40 @@ label.checkbox-row a {
   line-height: 1.4;
 }
 .current-provider-note svg { flex-shrink: 0; margin-top: 2px; }
+
+/* ============================================================
+   DISPATCH MODAL — no-email expander
+   ============================================================ */
+.no-email-expander {
+  margin-top: 12px;
+  border: 1px dashed #d8d8d8;
+  border-radius: 8px;
+  padding: 4px 0;
+}
+.no-email-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-weight: 500;
+  color: #4a4a4a;
+  list-style: none;
+  border-radius: 6px;
+}
+.no-email-summary::-webkit-details-marker { display: none; }
+.no-email-summary::marker { content: ""; }
+.no-email-summary:hover { background: #f5f5f5; }
+.no-email-summary svg { flex-shrink: 0; color: #777; }
+.no-email-summary > span:first-of-type { flex: 1; }
+.no-email-expander[open] .no-email-summary {
+  border-bottom: 1px solid #ececec;
+  margin-bottom: 8px;
+}
+.no-email-explainer {
+  padding: 4px 12px 8px;
+  line-height: 1.4;
+}
+.no-email-expander .dealer-row {
+  margin: 6px 8px;
+}

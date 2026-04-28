@@ -2705,6 +2705,161 @@ function DispatchModal({
     return Boolean(overridden ?? p.email);
   }).length;
 
+  // Partition providers by whether they have a published email. Sendable
+  // rows render in the main list. No-email rows are tucked behind an
+  // expander so the modal stays focused on what the user can act on.
+  // We bucket by `p.email` (the original published email) NOT `effectiveEmail`,
+  // so a row stays in its bucket even after the user adds a manual override
+  // — prevents the input from re-mounting and losing focus mid-typing.
+  const sendableProviders = payload.providers.filter((p) => Boolean(p.email));
+  const noEmailProviders = payload.providers.filter((p) => !p.email);
+  // If everything we discovered lacks an email, expand the no-email section
+  // by default and explain why — otherwise the modal looks empty.
+  const expandNoEmailByDefault = sendableProviders.length === 0 && noEmailProviders.length > 0;
+
+  // Single render function for both buckets so the markup stays identical.
+  const renderDealerRow = (p: DispatchProvider) => {
+    const overrideEmail = emailOverrides[p.id];
+    const effectiveEmail = overrideEmail ?? p.email;
+    const hasEmail = Boolean(effectiveEmail);
+    const isSelected = selected.has(p.id) && hasEmail;
+    const isPreferred = preferredId === p.id;
+    return (
+      <div
+        key={p.id}
+        className={`dealer-row ${isSelected ? "selected" : ""} ${isPreferred ? "preferred" : ""} ${!hasEmail ? "no-email" : ""} ${p.is_current_provider ? "current-provider" : ""}`}
+      >
+        {hasEmail ? (
+          <button
+            type="button"
+            className="dealer-toggle"
+            onClick={() => toggle(p.id)}
+            aria-pressed={isSelected}
+            aria-label="Toggle send to this dealer"
+          >
+            <span className={`checkbox ${isSelected ? "checked" : ""}`}>
+              {isSelected && <CheckCircle2 size={14} />}
+            </span>
+          </button>
+        ) : (
+          <span className="dealer-toggle dealer-toggle-disabled" aria-hidden>
+            <Phone size={16} />
+          </span>
+        )}
+        <div className="dealer-info">
+          <div className="dealer-name">
+            <strong>{p.name}</strong>
+            {p.is_current_provider && (
+              <span className="current-provider-badge" title="Your current provider">
+                Your current provider
+              </span>
+            )}
+            {p.distance_miles != null && (
+              <span className="dealer-distance" title="Distance from your ZIP">
+                <MapPin size={12} /> {formatDistance(p.distance_miles)}
+              </span>
+            )}
+            {p.rating != null && (
+              <span className="dealer-rating">
+                <Star size={12} /> {p.rating.toFixed(1)}
+                {p.rating_count != null && (
+                  <span className="muted"> ({p.rating_count})</span>
+                )}
+              </span>
+            )}
+            {!hasEmail && (
+              <span className="phone-only-badge" title="No verified email — reach out by phone or website">
+                Phone / website only
+              </span>
+            )}
+          </div>
+          {p.is_current_provider && p.current_provider_note && (
+            <div className="current-provider-note">
+              <Info size={12} /> {p.current_provider_note}
+            </div>
+          )}
+          {p.location && (
+            <div className="dealer-meta">
+              <MapPin size={12} /> <span className="small muted">{p.location}</span>
+            </div>
+          )}
+          {p.phone && (
+            <div className="dealer-meta">
+              <Phone size={12} />{" "}
+              <a href={`tel:${p.phone}`} className="small">{p.phone}</a>
+            </div>
+          )}
+          <div className="dealer-meta dealer-email-row">
+            <Mail size={12} />
+            {editingEmailId === p.id ? (
+              <input
+                autoFocus
+                type="email"
+                defaultValue={effectiveEmail ?? ""}
+                className="dealer-email-input"
+                onBlur={(e) => {
+                  const v = e.target.value.trim();
+                  if (v) {
+                    setEmailOverrides((prev) => ({ ...prev, [p.id]: v }));
+                    // Auto-select once an email is added.
+                    setSelected((prev) => new Set(prev).add(p.id));
+                  }
+                  setEditingEmailId(null);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    (e.target as HTMLInputElement).blur();
+                  } else if (e.key === "Escape") {
+                    setEditingEmailId(null);
+                  }
+                }}
+              />
+            ) : effectiveEmail ? (
+              <span className="small">
+                {effectiveEmail}
+                <button
+                  className="ghost small inline-edit"
+                  type="button"
+                  onClick={() => setEditingEmailId(p.id)}
+                >
+                  edit
+                </button>
+              </span>
+            ) : (
+              <span className="small muted">
+                no published email —
+                <button
+                  className="ghost small inline-edit"
+                  type="button"
+                  onClick={() => setEditingEmailId(p.id)}
+                >
+                  add one manually
+                </button>
+              </span>
+            )}
+          </div>
+          {p.website && (
+            <div className="dealer-meta">
+              <ExternalLink size={12} />{" "}
+              <a href={p.website} target="_blank" rel="noreferrer" className="small">
+                Visit website
+              </a>
+            </div>
+          )}
+          <label className="preferred-radio small">
+            <input
+              type="radio"
+              name="preferred"
+              checked={isPreferred}
+              onChange={() => setPreferredId(p.id)}
+            />
+            Set as my preferred dealer
+          </label>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal dispatch-modal" onClick={(e) => e.stopPropagation()}>
@@ -2740,155 +2895,48 @@ function DispatchModal({
         {/* Dealer list */}
         <div className="dealer-list">
           <div className="dealer-list-head">
-            <strong>Dealers found ({payload.providers.length})</strong>
+            <strong>
+              {sendableProviders.length} dealer{sendableProviders.length === 1 ? "" : "s"}
+              {" "}ready to contact
+            </strong>
             <span className="small muted">Tap a row to include or skip</span>
           </div>
+
           {payload.providers.length === 0 && (
             <p className="muted small">
               No dealers found near your ZIP. Add one manually under Tasks → Provider outreach.
             </p>
           )}
-          {payload.providers.map((p) => {
-            const overrideEmail = emailOverrides[p.id];
-            const effectiveEmail = overrideEmail ?? p.email;
-            const hasEmail = Boolean(effectiveEmail);
-            const isSelected = selected.has(p.id) && hasEmail;
-            const isPreferred = preferredId === p.id;
-            return (
-              <div
-                key={p.id}
-                className={`dealer-row ${isSelected ? "selected" : ""} ${isPreferred ? "preferred" : ""} ${!hasEmail ? "no-email" : ""} ${p.is_current_provider ? "current-provider" : ""}`}
-              >
-                {hasEmail ? (
-                  <button
-                    type="button"
-                    className="dealer-toggle"
-                    onClick={() => toggle(p.id)}
-                    aria-pressed={isSelected}
-                    aria-label="Toggle send to this dealer"
-                  >
-                    <span className={`checkbox ${isSelected ? "checked" : ""}`}>
-                      {isSelected && <CheckCircle2 size={14} />}
-                    </span>
-                  </button>
-                ) : (
-                  <span className="dealer-toggle dealer-toggle-disabled" aria-hidden>
-                    <Phone size={16} />
-                  </span>
-                )}
-                <div className="dealer-info">
-                  <div className="dealer-name">
-                    <strong>{p.name}</strong>
-                    {p.is_current_provider && (
-                      <span className="current-provider-badge" title="Your current provider">
-                        Your current provider
-                      </span>
-                    )}
-                    {p.distance_miles != null && (
-                      <span className="dealer-distance" title="Distance from your ZIP">
-                        <MapPin size={12} /> {formatDistance(p.distance_miles)}
-                      </span>
-                    )}
-                    {p.rating != null && (
-                      <span className="dealer-rating">
-                        <Star size={12} /> {p.rating.toFixed(1)}
-                        {p.rating_count != null && (
-                          <span className="muted"> ({p.rating_count})</span>
-                        )}
-                      </span>
-                    )}
-                    {!hasEmail && (
-                      <span className="phone-only-badge" title="No verified email — reach out by phone or website">
-                        Phone / website only
-                      </span>
-                    )}
-                  </div>
-                  {p.is_current_provider && p.current_provider_note && (
-                    <div className="current-provider-note">
-                      <Info size={12} /> {p.current_provider_note}
-                    </div>
-                  )}
-                  {p.location && (
-                    <div className="dealer-meta">
-                      <MapPin size={12} /> <span className="small muted">{p.location}</span>
-                    </div>
-                  )}
-                  {p.phone && (
-                    <div className="dealer-meta">
-                      <Phone size={12} />{" "}
-                      <a href={`tel:${p.phone}`} className="small">{p.phone}</a>
-                    </div>
-                  )}
-                  <div className="dealer-meta dealer-email-row">
-                    <Mail size={12} />
-                    {editingEmailId === p.id ? (
-                      <input
-                        autoFocus
-                        type="email"
-                        defaultValue={effectiveEmail ?? ""}
-                        className="dealer-email-input"
-                        onBlur={(e) => {
-                          const v = e.target.value.trim();
-                          if (v) {
-                            setEmailOverrides((prev) => ({ ...prev, [p.id]: v }));
-                            // Auto-select once an email is added.
-                            setSelected((prev) => new Set(prev).add(p.id));
-                          }
-                          setEditingEmailId(null);
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            (e.target as HTMLInputElement).blur();
-                          } else if (e.key === "Escape") {
-                            setEditingEmailId(null);
-                          }
-                        }}
-                      />
-                    ) : effectiveEmail ? (
-                      <span className="small">
-                        {effectiveEmail}
-                        <button
-                          className="ghost small inline-edit"
-                          type="button"
-                          onClick={() => setEditingEmailId(p.id)}
-                        >
-                          edit
-                        </button>
-                      </span>
-                    ) : (
-                      <span className="small muted">
-                        no published email —
-                        <button
-                          className="ghost small inline-edit"
-                          type="button"
-                          onClick={() => setEditingEmailId(p.id)}
-                        >
-                          add one manually
-                        </button>
-                      </span>
-                    )}
-                  </div>
-                  {p.website && (
-                    <div className="dealer-meta">
-                      <ExternalLink size={12} />{" "}
-                      <a href={p.website} target="_blank" rel="noreferrer" className="small">
-                        Visit website
-                      </a>
-                    </div>
-                  )}
-                  <label className="preferred-radio small">
-                    <input
-                      type="radio"
-                      name="preferred"
-                      checked={isPreferred}
-                      onChange={() => setPreferredId(p.id)}
-                    />
-                    Set as my preferred dealer
-                  </label>
-                </div>
-              </div>
-            );
-          })}
+
+          {sendableProviders.length === 0 && noEmailProviders.length > 0 && (
+            <p className="muted small">
+              No dealers near you publish a verified email. We've listed{" "}
+              {noEmailProviders.length} below with phone &amp; website so you can
+              reach out directly, or add an email manually.
+            </p>
+          )}
+
+          {sendableProviders.map(renderDealerRow)}
+
+          {noEmailProviders.length > 0 && (
+            <details className="no-email-expander" open={expandNoEmailByDefault}>
+              <summary className="no-email-summary">
+                <Phone size={14} />
+                <span>
+                  {noEmailProviders.length} more{" "}
+                  {noEmailProviders.length === 1 ? "provider" : "providers"} without a
+                  verified email
+                </span>
+                <span className="small muted">— phone &amp; website only</span>
+              </summary>
+              <p className="small muted no-email-explainer">
+                Automoteev only auto-emails dealers with a verified address. These show
+                their phone and website so you can reach out directly. If you have an
+                email for one of them, tap "add one manually" on the row to include it.
+              </p>
+              {noEmailProviders.map(renderDealerRow)}
+            </details>
+          )}
         </div>
 
         {error && <div className="error">{error}</div>}
