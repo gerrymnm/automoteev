@@ -461,6 +461,11 @@ export async function planAttachmentsForDispatch(params: {
       .select(
         "id, file_name, mime_type, document_kind, category, byte_size, vehicle_id, user_id, extraction_status"
       )
+      // Defense-in-depth: ALWAYS filter by user_id even for vehicle-scoped
+      // categories. The caller must already have validated vehicle ownership
+      // before reaching here, but if a vehicle_id is ever leaked or guessed
+      // we won't surface another user's documents into the dispatch payload.
+      .eq("user_id", params.userId)
       .eq("category", category)
       .eq("extraction_status", "completed")
       .order("uploaded_at", { ascending: false })
@@ -469,7 +474,7 @@ export async function planAttachmentsForDispatch(params: {
     if (category === "identity") {
       // DL is user-scoped, not vehicle-scoped. The orphan-no-vehicle row is
       // exactly the one we want.
-      query = query.eq("user_id", params.userId).is("vehicle_id", null);
+      query = query.is("vehicle_id", null);
     } else {
       query = query.eq("vehicle_id", params.vehicleId);
     }

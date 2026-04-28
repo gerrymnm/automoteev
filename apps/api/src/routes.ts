@@ -1988,6 +1988,20 @@ router.post("/api/documents", upload.single("file"), async (req, res) => {
     return res.status(415).json({ error: `Unsupported mime type: ${file.mimetype}` });
   }
 
+  // Ownership check on the vehicle_id before we let the admin client write
+  // a row tying this document to that vehicle. Without this, a malicious
+  // caller could pass any vehicle UUID and the storage path would land
+  // under vehicles/<other-user-vehicle-id>/<category>/. The req.db client
+  // is RLS-scoped to req.user; if the row isn't visible, ownership fails.
+  if (vehicle_id) {
+    const { data: ownership } = await req
+      .db!.from("vehicles")
+      .select("id")
+      .eq("id", vehicle_id)
+      .maybeSingle();
+    if (!ownership) return res.status(404).json({ error: "Vehicle not found" });
+  }
+
   const doc = await uploadDocument({
     userId: req.user!.id,
     vehicleId: vehicle_id ?? null,
@@ -3082,6 +3096,13 @@ router.post("/api/tasks/:id/dispatch", async (req, res) => {
             }))
           : undefined
       });
+      // sendTaskEmail does NOT throw on Resend errors — it returns
+      // status: "error" with the message. Treat anything that wasn't a
+      // genuine send (or the dev-mode no-resend-key skip) as a skip so
+      // the sent counter, autonomy progression, and task status all
+      // reflect reality. Without this check, a Resend outage looked like
+      // a successful dispatch and advanced the user's autonomy level.
+      const wasSent = result.status === "sent" || result.status === "skipped_no_resend_key";
       const { data: log } = await req
         .db!.from("task_emails")
         .insert({
@@ -3100,7 +3121,14 @@ router.post("/api/tasks/:id/dispatch", async (req, res) => {
         .select()
         .single();
       if (log) sentLogs.push(log);
-      sent++;
+      if (wasSent) {
+        sent++;
+      } else {
+        skipped.push({
+          provider_id: p.id,
+          reason: result.error ?? `send_${result.status}`
+        });
+      }
     } catch (err) {
       skipped.push({
         provider_id: p.id,
