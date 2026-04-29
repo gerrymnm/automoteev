@@ -1,14 +1,9 @@
-// Vehicle valuation — deterministic estimator. Not as accurate as KBB or
-// MarketCheck pricing, but directional. Always returned as a RANGE and
-// labeled as an estimate. We can replace this with a paid API later
-// (MarketCheck / Black Book) without changing the response shape.
+import { env } from "../config.js";
 
 interface ValuationInput {
-  year: number | null;
-  make: string | null;
-  model: string | null;
+  vin: string;
   mileage: number;
-  condition?: "excellent" | "good" | "fair" | "poor";
+  zipCode?: string | null;
 }
 
 export interface ValuationResult {
@@ -16,210 +11,81 @@ export interface ValuationResult {
   market_value_high_cents: number;
   dealer_value_low_cents: number;
   dealer_value_high_cents: number;
-  basis: string; // human-readable explanation of how we got there
-  source: "automoteev_estimate";
+  basis: string;
+  source: "marketcheck";
   is_estimate: true;
 }
 
-/**
- * Rough segment baseline new-vehicle price in USD. Used when we don't
- * have a model-specific table entry. These numbers are kept conservative
- * and lean toward the volume midpoint of each segment.
- */
-const SEGMENT_DEFAULTS: Record<string, number> = {
-  compact_car: 24_000,
-  midsize_car: 30_000,
-  full_size_car: 38_000,
-  compact_suv: 32_000,
-  midsize_suv: 42_000,
-  full_size_suv: 65_000,
-  pickup: 50_000,
-  luxury_car: 60_000,
-  luxury_suv: 75_000,
-  ev: 45_000,
-  unknown: 32_000
-};
+interface MarketCheckPriceResponse {
+  marketcheck_price?: number;
+  msrp?: number;
+}
 
-/**
- * Very small known-model overrides. We can grow this table over time;
- * everything else falls back to a segment-based guess. The intent here
- * is to be roughly right, not perfectly right. Values are MSRP-ish in
- * USD for a fairly recent model year.
- */
-const MODEL_BASELINE_USD: Record<string, number> = {
-  "toyota:camry": 28_000,
-  "toyota:corolla": 22_500,
-  "toyota:rav4": 30_500,
-  "toyota:highlander": 41_000,
-  "toyota:tacoma": 33_000,
-  "toyota:tundra": 41_000,
-  "honda:civic": 24_000,
-  "honda:accord": 28_500,
-  "honda:cr-v": 30_000,
-  "honda:pilot": 41_000,
-  "ford:f-150": 40_000,
-  "ford:ranger": 28_000,
-  "ford:explorer": 39_000,
-  "ford:escape": 29_000,
-  "chevrolet:silverado 1500": 39_000,
-  "chevrolet:malibu": 26_000,
-  "chevrolet:equinox": 28_000,
-  "chevrolet:tahoe": 56_000,
-  "nissan:altima": 26_500,
-  "nissan:rogue": 29_000,
-  "nissan:sentra": 21_500,
-  "hyundai:elantra": 22_000,
-  "hyundai:tucson": 28_500,
-  "hyundai:santa fe": 31_000,
-  "kia:forte": 21_500,
-  "kia:sorento": 32_000,
-  "kia:sportage": 28_000,
-  "subaru:outback": 30_000,
-  "subaru:forester": 28_500,
-  "subaru:crosstrek": 26_500,
-  "mazda:cx-5": 30_000,
-  "mazda:cx-30": 25_500,
-  "mazda:3": 24_000,
-  "tesla:model 3": 42_000,
-  "tesla:model y": 49_000,
-  "tesla:model s": 78_000,
-  "tesla:model x": 90_000,
-  "bmw:3 series": 45_000,
-  "bmw:5 series": 56_000,
-  "bmw:x3": 48_000,
-  "bmw:x5": 67_000,
-  "mercedes-benz:c-class": 47_000,
-  "mercedes-benz:e-class": 58_000,
-  "mercedes-benz:gle": 64_000,
-  "audi:a4": 41_000,
-  "audi:q5": 47_000,
-  "audi:q7": 60_000,
-  "lexus:rx": 51_000,
-  "lexus:nx": 41_000,
-  "lexus:es": 43_000,
-  "jeep:wrangler": 35_000,
-  "jeep:grand cherokee": 41_000,
-  "jeep:cherokee": 31_000,
-  "ram:1500": 41_000,
-  "gmc:sierra 1500": 41_000,
-  "gmc:yukon": 60_000,
-  "volkswagen:jetta": 22_000,
-  "volkswagen:tiguan": 28_000,
-  "volkswagen:atlas": 38_000,
-  // Land Rover / Range Rover
-  "land rover:range rover": 92_000,
-  "land rover:range rover sport": 75_000,
-  "land rover:range rover velar": 60_000,
-  "land rover:range rover evoque": 45_000,
-  "land rover:discovery": 55_000,
-  "land rover:discovery sport": 42_000,
-  "land rover:defender": 55_000,
-  // Porsche
-  "porsche:cayenne": 75_000,
-  "porsche:macan": 60_000,
-  "porsche:911": 110_000,
-  "porsche:panamera": 95_000,
-  "porsche:taycan": 95_000,
-  // Genesis
-  "genesis:g70": 38_000,
-  "genesis:g80": 48_000,
-  "genesis:g90": 73_000,
-  "genesis:gv70": 43_000,
-  "genesis:gv80": 56_000,
-  // Volvo
-  "volvo:xc60": 45_000,
-  "volvo:xc90": 56_000,
-  "volvo:xc40": 36_000,
-  "volvo:s60": 41_000,
-  // Cadillac
-  "cadillac:escalade": 80_000,
-  "cadillac:xt5": 45_000,
-  "cadillac:xt6": 50_000,
-  "cadillac:ct5": 40_000,
-  // Lincoln
-  "lincoln:navigator": 78_000,
-  "lincoln:aviator": 55_000,
-  "lincoln:nautilus": 45_000,
-  // Acura
-  "acura:mdx": 50_000,
-  "acura:rdx": 42_000,
-  "acura:tlx": 39_000,
-  // Infiniti
-  "infiniti:qx60": 49_000,
-  "infiniti:qx80": 70_000,
-  "infiniti:q50": 42_000
-};
+const MARKETCHECK_ENDPOINTS = {
+  base: "https://api.marketcheck.com/v2/predict/car/us/marketcheck_price",
+  premium: "https://api.marketcheck.com/v2/predict/car/us/marketcheck_price/comparables",
+  premium_plus: "https://api.marketcheck.com/v2/predict/car/us/marketcheck_price/comparables/decode"
+} as const;
 
-export function estimateVehicleValue(input: ValuationInput): ValuationResult | null {
-  if (!input.year || !input.make || !input.model) return null;
-  const currentYear = new Date().getFullYear();
-  const age = Math.max(0, currentYear - input.year);
-
-  const baseline = baselineForVehicle(input.make, input.model);
-
-  // Depreciation curve: ~20% year 1, ~15% years 2-3, ~10% years 4-7, ~7% afterward.
-  let multiplier = 1;
-  for (let y = 1; y <= age; y++) {
-    if (y === 1) multiplier *= 0.8;
-    else if (y <= 3) multiplier *= 0.85;
-    else if (y <= 7) multiplier *= 0.9;
-    else multiplier *= 0.93;
+export async function getVehicleValuation(input: ValuationInput): Promise<ValuationResult> {
+  if (!env.MARKETCHECK_API_KEY) {
+    throw new Error("MarketCheck is not configured yet.");
   }
-  const depreciatedUsd = baseline * multiplier;
+  if (!input.vin || input.vin.length !== 17) {
+    throw new Error("A valid 17-character VIN is required for valuation.");
+  }
+  if (!input.mileage || input.mileage <= 0) {
+    throw new Error("Current mileage is required for valuation.");
+  }
+  if (!input.zipCode) {
+    throw new Error("ZIP code is required for local market valuation.");
+  }
 
-  // Mileage adjustment: assume 12,000 mi/yr is "typical." Every 1,000 mi over
-  // typical reduces value ~$80; every 1,000 mi under typical adds ~$50.
-  const expectedMiles = age * 12_000;
-  const milesDelta = input.mileage - expectedMiles;
-  const mileageAdj = milesDelta >= 0 ? -1 * (milesDelta / 1000) * 80 : -1 * (milesDelta / 1000) * 50;
-  const mileageAdjustedUsd = Math.max(1500, depreciatedUsd + mileageAdj);
+  const endpoint = MARKETCHECK_ENDPOINTS[env.MARKETCHECK_PRICE_TIER];
+  const params = new URLSearchParams({
+    api_key: env.MARKETCHECK_API_KEY,
+    vin: input.vin.toUpperCase(),
+    miles: String(input.mileage),
+    dealer_type: env.MARKETCHECK_DEALER_TYPE,
+    zip: input.zipCode
+  });
 
-  // Condition adjustment.
-  const conditionMultiplier =
-    input.condition === "excellent"
-      ? 1.05
-      : input.condition === "fair"
-      ? 0.92
-      : input.condition === "poor"
-      ? 0.8
-      : 1;
-  const finalUsd = mileageAdjustedUsd * conditionMultiplier;
+  const response = await fetch(`${endpoint}?${params.toString()}`, {
+    headers: { Accept: "application/json" }
+  });
+  const body = (await response.json().catch(() => ({}))) as
+    | MarketCheckPriceResponse
+    | { message?: string; error?: string };
 
-  // Market (private-party) is the headline number. Range is +/- 7% to reflect
-  // local market noise. Dealer trade-in is typically 80-87% of private-party.
-  const marketLowUsd = finalUsd * 0.93;
-  const marketHighUsd = finalUsd * 1.07;
-  const dealerLowUsd = finalUsd * 0.8;
-  const dealerHighUsd = finalUsd * 0.87;
+  if (!response.ok) {
+    const message =
+      "message" in body && body.message
+        ? body.message
+        : "error" in body && body.error
+        ? body.error
+        : "MarketCheck valuation failed.";
+    throw new Error(message);
+  }
+
+  const marketPriceUsd = "marketcheck_price" in body ? Number(body.marketcheck_price) : NaN;
+  if (!Number.isFinite(marketPriceUsd) || marketPriceUsd <= 0) {
+    throw new Error("MarketCheck did not return a usable vehicle value.");
+  }
+
+  // MarketCheck returns a point prediction. Automoteev displays ranges so users
+  // do not treat a single API result like a guaranteed sale or trade-in offer.
+  const marketLowUsd = marketPriceUsd * 0.95;
+  const marketHighUsd = marketPriceUsd * 1.05;
+  const dealerLowUsd = marketPriceUsd * 0.82;
+  const dealerHighUsd = marketPriceUsd * 0.9;
 
   return {
     market_value_low_cents: Math.round(marketLowUsd * 100),
     market_value_high_cents: Math.round(marketHighUsd * 100),
     dealer_value_low_cents: Math.round(dealerLowUsd * 100),
     dealer_value_high_cents: Math.round(dealerHighUsd * 100),
-    basis: `Estimate based on ${input.year} ${input.make} ${input.model}, ${input.mileage.toLocaleString()} mi, age-based depreciation.`,
-    source: "automoteev_estimate",
+    basis: `MarketCheck price prediction for VIN ${input.vin.toUpperCase()} at ${input.mileage.toLocaleString()} miles in ZIP ${input.zipCode}.`,
+    source: "marketcheck",
     is_estimate: true
   };
-}
-
-function baselineForVehicle(make: string, model: string): number {
-  // Normalize: lowercase + collapse multi-space.
-  const key = `${make.toLowerCase()}:${model.toLowerCase().replace(/\s+/g, " ").trim()}`;
-  if (MODEL_BASELINE_USD[key]) return MODEL_BASELINE_USD[key]!;
-
-  // Fallback: classify by make-only segment.
-  const m = make.toLowerCase();
-  // Ultra-luxury: Range Rover-tier brands fall back to luxury_suv even if model is unknown.
-  if (["land rover", "porsche", "maserati", "bentley", "rolls-royce", "aston martin", "ferrari", "lamborghini"].includes(m)) {
-    return SEGMENT_DEFAULTS.luxury_suv!;
-  }
-  if (["bmw", "mercedes-benz", "audi", "lexus", "infiniti", "acura", "cadillac", "lincoln", "genesis", "volvo"].includes(m)) {
-    return SEGMENT_DEFAULTS.luxury_car!;
-  }
-  if (m === "tesla") return SEGMENT_DEFAULTS.ev!;
-  if (["ram", "ford", "chevrolet", "gmc", "toyota", "nissan"].includes(m)) {
-    return SEGMENT_DEFAULTS.midsize_suv!;
-  }
-  return SEGMENT_DEFAULTS.unknown!;
 }

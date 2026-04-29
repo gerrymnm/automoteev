@@ -32,6 +32,11 @@ const envSchema = z.object({
   // Google
   GOOGLE_MAPS_API_KEY: z.string().optional(),
 
+  // MarketCheck temporary valuation provider
+  MARKETCHECK_API_KEY: z.string().optional(),
+  MARKETCHECK_PRICE_TIER: z.enum(["base", "premium", "premium_plus"]).default("base"),
+  MARKETCHECK_DEALER_TYPE: z.enum(["independent", "franchise"]).default("independent"),
+
   // EIA
   EIA_API_KEY: z.string().optional(),
 

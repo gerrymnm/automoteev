@@ -78,6 +78,13 @@ function isDispatchableTaskType(t: string | null | undefined): boolean {
 type Tab = "home" | "command" | "history" | "settings";
 type FormId = "insurance" | "loan" | "fuel" | "preferred_shop";
 
+const TAB_LABELS: Record<Tab, string> = {
+  home: "Home",
+  command: "Ask",
+  history: "Tasks",
+  settings: "Account"
+};
+
 // ============================================================
 // Session context
 // ============================================================
@@ -323,7 +330,7 @@ function LandingPage() {
             <div className="how-card">
               <div className="how-step">1</div>
               <h3>Add your vehicle</h3>
-              <p>VIN and mileage are enough. Snap a photo of your insurance dec page or loan statement and Automoteev fills in the rest.</p>
+              <p>VIN and mileage are enough. Type policy or loan basics, snap a screenshot, or connect accounts when Plaid is available.</p>
             </div>
             <div className="how-card">
               <div className="how-step">2</div>
@@ -399,7 +406,7 @@ function LandingPage() {
                 <li>Document upload + AI auto-fill</li>
                 <li>Multi-vehicle support</li>
                 <li>OBD dongle reservation</li>
-                <li>SMS channel (coming soon)</li>
+                <li>SMS approvals and alerts</li>
               </ul>
               <Link to="/signup" className="primary pricing-cta">Start free, upgrade anytime</Link>
             </div>
@@ -532,7 +539,7 @@ function PrivacyPage() {
           <ul>
             <li><strong>Account info:</strong> name, email, ZIP code, optional phone.</li>
             <li><strong>Vehicle info:</strong> VIN, mileage, ownership type, insurance carrier, loan/lease terms, recall status.</li>
-            <li><strong>Documents you upload:</strong> insurance dec pages, loan statements. Used only to extract structured fields you can apply to your profile.</li>
+            <li><strong>Documents you upload:</strong> optional screenshots, dec pages, and loan statements. Used only to extract structured fields you can apply to your profile.</li>
             <li><strong>Activity:</strong> tasks you create, providers you approve, emails the agent sends and receives on your behalf.</li>
           </ul>
 
@@ -899,7 +906,7 @@ function Product({ session }: { session: Session }) {
           <nav className="tabs desktop-only" aria-label="Main">
             {(["home", "command", "history", "settings"] as Tab[]).map((item) => (
               <button className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>
-                {item}
+                {TAB_LABELS[item]}
               </button>
             ))}
           </nav>
@@ -986,7 +993,7 @@ function Product({ session }: { session: Session }) {
         {(["home", "command", "history", "settings"] as Tab[]).map((item) => (
           <button className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>
             <BottomNavIcon tab={item} />
-            <span>{item}</span>
+            <span>{TAB_LABELS[item]}</span>
           </button>
         ))}
       </nav>
@@ -1270,6 +1277,7 @@ function Home({
       {/* ---------- Quick capture: snap-a-photo — always available ---------- */}
       <DocumentDropZone
         vehicleId={vehicleId}
+        onOpenForm={onOpenForm}
         onComplete={() => {
           setDocsRefreshKey((k) => k + 1);
           onRefresh();
@@ -1692,6 +1700,8 @@ function Status({
   const infoInsights = dashboard.insights.filter((i) => i.severity === "info");
   const hasRecalls = dashboard.open_recalls.length > 0;
   const hasPriority = hasRecalls || urgentInsights.length > 0 || recommendedInsights.length > 0;
+  const [valueBusy, setValueBusy] = useState(false);
+  const [valueError, setValueError] = useState<string | null>(null);
 
   // Find any active recall_repair task so the recall card can show its current
   // state (awaiting approval vs dispatched and waiting on dealer reply) instead
@@ -1701,6 +1711,19 @@ function Status({
       t.task_type === "recall_repair" &&
       ["needs_user_approval", "approved", "in_progress", "waiting_on_provider"].includes(t.status)
   ) ?? null;
+
+  async function checkVehicleValue() {
+    setValueBusy(true);
+    setValueError(null);
+    try {
+      await api(`/api/vehicles/${vehicleId}/value/refresh`, { method: "POST" });
+      await Promise.resolve(onRefresh());
+    } catch (err) {
+      setValueError(err instanceof Error ? err.message : "Could not check vehicle value.");
+    } finally {
+      setValueBusy(false);
+    }
+  }
 
   return (
     <section className="status-layout">
@@ -1740,16 +1763,44 @@ function Status({
           />
         )}
 
+        <section className="value-inquiry-card">
+          <div>
+            <span className="small muted">Vehicle value</span>
+            <h3>What is my car worth?</h3>
+            {dashboard.valuation ? (
+              <p>
+                <strong>{moneyRange(dashboard.valuation.market_value_low_cents, dashboard.valuation.market_value_high_cents)}</strong>
+                <span className="small muted">
+                  {" "}market range
+                  {dashboard.valuation.estimated_at
+                    ? ` · checked ${new Date(dashboard.valuation.estimated_at).toLocaleDateString()}`
+                    : ""}
+                </span>
+              </p>
+            ) : (
+              <p className="small muted">
+                Tap once and Automoteev will check current market pricing for this VIN.
+              </p>
+            )}
+            {dashboard.valuation && (
+              <p className="small muted">
+                Estimated dealer offer:{" "}
+                {moneyRange(dashboard.valuation.dealer_value_low_cents, dashboard.valuation.dealer_value_high_cents)}
+              </p>
+            )}
+            {valueError && <p className="error small">{valueError}</p>}
+          </div>
+          <button className="primary value-check-button" type="button" onClick={checkVehicleValue} disabled={valueBusy}>
+            {valueBusy ? (
+              <><Loader2 size={16} className="spinner" /> Checking</>
+            ) : (
+              <><DollarSign size={16} /> {dashboard.valuation ? "Update value" : "Check value"}</>
+            )}
+          </button>
+        </section>
+
         <div className="metric-grid">
           <Metric label="Monthly cost" value={money(dashboard.cost_profile?.total_monthly_cost_cents)} />
-          <Metric
-            label="Market value (est.)"
-            value={moneyRange(dashboard.valuation?.market_value_low_cents, dashboard.valuation?.market_value_high_cents)}
-          />
-          <Metric
-            label="Dealer offer (est.)"
-            value={moneyRange(dashboard.valuation?.dealer_value_low_cents, dashboard.valuation?.dealer_value_high_cents)}
-          />
           <Metric label="Loan/lease balance" value={money(dashboard.loan_lease?.balance_cents)} />
           <Metric label="Insurance" value={dashboard.insurance?.carrier_name ?? "Missing"} />
           <Metric
@@ -2943,7 +2994,15 @@ function VehicleDocumentsPanel({
 // ============================================================
 // Document Drop Zone (image capture for dec page / loan statement)
 // ============================================================
-function DocumentDropZone({ vehicleId, onComplete }: { vehicleId: string; onComplete: () => void }) {
+function DocumentDropZone({
+  vehicleId,
+  onComplete,
+  onOpenForm
+}: {
+  vehicleId: string;
+  onComplete: () => void;
+  onOpenForm?: (formId: FormId) => void;
+}) {
   const [uploading, setUploading] = useState<
     "insurance_dec_page" | "loan_statement" | "drivers_license" | null
   >(null);
@@ -3034,9 +3093,33 @@ function DocumentDropZone({ vehicleId, onComplete }: { vehicleId: string; onComp
   }
 
   return (
-    <div className="sub-panel">
-      <h3>Snap a photo, Automoteev fills it in</h3>
-      <p className="small muted">No typing. Take a picture of your dec page or loan statement and Automoteev pulls out the details.</p>
+    <div className="sub-panel intake-panel">
+      <div className="intake-head">
+        <div>
+          <h3>Add policy or loan details</h3>
+          <p className="small muted">
+            Use whatever is easiest: type the basics, snap a document, or connect accounts when Plaid is ready.
+          </p>
+        </div>
+      </div>
+
+      {onOpenForm && (
+        <div className="intake-choice-row">
+          <button type="button" className="intake-choice primary" onClick={() => onOpenForm("insurance")}>
+            <ShieldCheck size={16} /> Type insurance
+          </button>
+          <button type="button" className="intake-choice secondary" onClick={() => onOpenForm("loan")}>
+            <DollarSign size={16} /> Type loan
+          </button>
+          <button type="button" className="intake-choice ghost" disabled title="Plaid connection is next">
+            <Lock size={16} /> Connect bank soon
+          </button>
+        </div>
+      )}
+
+      <p className="small muted intake-upload-label">
+        Have a PDF, screenshot, or photo? Automoteev can still read it for you.
+      </p>
 
       <div className="upload-cards">
         <button
@@ -3708,11 +3791,14 @@ function DispatchModal({
   // We bucket by `p.email` (the original published email) NOT `effectiveEmail`,
   // so a row stays in its bucket even after the user adds a manual override
   // — prevents the input from re-mounting and losing focus mid-typing.
-  const sendableProviders = payload.providers.filter((p) => Boolean(p.email));
-  const noEmailProviders = payload.providers.filter((p) => !p.email);
+  const relationshipProviders = payload.providers.filter((p) => p.is_current_provider);
+  const sendableProviders = payload.providers.filter((p) => Boolean(p.email) && !p.is_current_provider);
+  const noEmailProviders = payload.providers.filter((p) => !p.email && !p.is_current_provider);
+  const reviewableProviderCount = relationshipProviders.length + sendableProviders.length;
   // If everything we discovered lacks an email, expand the no-email section
   // by default and explain why — otherwise the modal looks empty.
-  const expandNoEmailByDefault = sendableProviders.length === 0 && noEmailProviders.length > 0;
+  const expandNoEmailByDefault =
+    relationshipProviders.length === 0 && sendableProviders.length === 0 && noEmailProviders.length > 0;
 
   // Single render function for both buckets so the markup stays identical.
   const renderDealerRow = (p: DispatchProvider) => {
@@ -3732,7 +3818,7 @@ function DispatchModal({
             className="dealer-toggle"
             onClick={() => toggle(p.id)}
             aria-pressed={isSelected}
-            aria-label="Toggle send to this dealer"
+            aria-label="Toggle send to this provider"
           >
             <span className={`checkbox ${isSelected ? "checked" : ""}`}>
               {isSelected && <CheckCircle2 size={14} />}
@@ -3747,8 +3833,8 @@ function DispatchModal({
           <div className="dealer-name">
             <strong>{p.name}</strong>
             {p.is_current_provider && (
-              <span className="current-provider-badge" title="Your current provider">
-                Your current provider
+              <span className="current-provider-badge" title="Your existing relationship">
+                Existing relationship
               </span>
             )}
             {p.verified_by_community && !p.is_current_provider && (
@@ -3782,9 +3868,13 @@ function DispatchModal({
               </span>
             )}
           </div>
-          {p.is_current_provider && p.current_provider_note && (
+          {p.is_current_provider && (
             <div className="current-provider-note">
-              <Info size={12} /> {p.current_provider_note}
+              <Info size={12} />{" "}
+              <span>
+                {p.current_provider_note ??
+                  "Use a known rep email for warmer outreach, or leave this provider unchecked."}
+              </span>
             </div>
           )}
           {p.location && (
@@ -3831,18 +3921,18 @@ function DispatchModal({
                   type="button"
                   onClick={() => setEditingEmailId(p.id)}
                 >
-                  edit
+                  {p.is_current_provider ? "use different rep" : "edit"}
                 </button>
               </span>
             ) : (
               <span className="small muted">
-                no published email —
+                {p.is_current_provider ? "add a known rep email " : "no published email - "}
                 <button
                   className="ghost small inline-edit"
                   type="button"
                   onClick={() => setEditingEmailId(p.id)}
                 >
-                  add one manually
+                  {p.is_current_provider ? "add rep" : "add one manually"}
                 </button>
               </span>
             )}
@@ -3862,7 +3952,7 @@ function DispatchModal({
               checked={isPreferred}
               onChange={() => setPreferredId(p.id)}
             />
-            Set as my preferred dealer
+            Set as my preferred provider
           </label>
         </div>
       </div>
@@ -3873,14 +3963,14 @@ function DispatchModal({
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal dispatch-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
-          <h2>Reach out to dealers</h2>
+          <h2>Reach out to providers</h2>
           <button className="ghost icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button>
         </div>
 
         <p className="small muted">
-          Automoteev only emails dealers with a verified contact address found on their
-          website. Dealers without a published email show their phone and website so you
-          can reach out directly. Pick which dealer becomes your preferred for next time.
+          Review who Automoteev may contact before anything is sent. Existing carriers,
+          lenders, and shops are shown first so you can add a known rep email for warmer
+          outreach instead of using a public inbox.
         </p>
 
         {/* Email preview */}
@@ -3919,24 +4009,36 @@ function DispatchModal({
         <div className="dealer-list">
           <div className="dealer-list-head">
             <strong>
-              {sendableProviders.length} dealer{sendableProviders.length === 1 ? "" : "s"}
-              {" "}ready to contact
+              {reviewableProviderCount} provider{reviewableProviderCount === 1 ? "" : "s"}
+              {" "}ready to review
             </strong>
-            <span className="small muted">Tap a row to include or skip</span>
+            <span className="small muted">Select who to include</span>
           </div>
 
           {payload.providers.length === 0 && (
             <p className="muted small">
-              No dealers found near your ZIP. Add one manually under Tasks → Provider outreach.
+              No providers found near your ZIP. Add one manually under Tasks → Provider outreach.
             </p>
           )}
 
           {sendableProviders.length === 0 && noEmailProviders.length > 0 && (
             <p className="muted small">
-              No dealers near you publish a verified email. We've listed{" "}
-              {noEmailProviders.length} below with phone &amp; website so you can
-              reach out directly, or add an email manually.
+              No additional providers near you publish a verified email. We've listed{" "}
+              {noEmailProviders.length} below with phone &amp; website so you can reach
+              out directly, or add an email manually.
             </p>
+          )}
+
+          {relationshipProviders.length > 0 && (
+            <section className="relationship-section">
+              <div className="relationship-section-head">
+                <strong>Existing relationships</strong>
+                <span className="small muted">
+                  Add your rep's email to make the outreach warmer.
+                </span>
+              </div>
+              {relationshipProviders.map(renderDealerRow)}
+            </section>
           )}
 
           {sendableProviders.map(renderDealerRow)}
@@ -3953,7 +4055,7 @@ function DispatchModal({
                 <span className="small muted">— phone &amp; website only</span>
               </summary>
               <p className="small muted no-email-explainer">
-                Automoteev only auto-emails dealers with a verified address. These show
+                Automoteev only auto-emails providers with a verified address. These show
                 their phone and website so you can reach out directly. If you have an
                 email for one of them, tap "add one manually" on the row to include it.
               </p>
@@ -3974,7 +4076,7 @@ function DispatchModal({
             {busy ? (
               <><Loader2 size={16} className="spinner" /> Sending…</>
             ) : (
-              <><Send size={16} /> Send to {sendableCount} dealer{sendableCount === 1 ? "" : "s"}</>
+              <><Send size={16} /> Send to {sendableCount} provider{sendableCount === 1 ? "" : "s"}</>
             )}
           </button>
           <button className="ghost" type="button" onClick={onClose} disabled={busy}>
@@ -4847,6 +4949,84 @@ function PushNotificationPanel() {
   );
 }
 
+function CommunicationPreferencesPanel() {
+  const [phone, setPhone] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const result = await api<{ pii: { phone: string | null } | null }>("/api/pii");
+        setPhone(result.pii?.phone ?? "");
+      } catch {
+        // Keep the field editable even if PII hasn't been created yet.
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  async function savePhone() {
+    setBusy(true);
+    setMessage(null);
+    try {
+      await api("/api/pii", {
+        method: "PUT",
+        body: JSON.stringify({ phone: phone.trim() || null })
+      });
+      setMessage(phone.trim() ? "SMS number saved." : "SMS number removed.");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Could not save SMS number.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="communication-panel">
+      <h2>How Automoteev reaches you</h2>
+      <p className="small muted">
+        App notifications, email, and SMS are for your approvals and important updates. Your phone number is not shared with providers.
+      </p>
+      <div className="channel-grid">
+        <div className="channel-card active">
+          <Bell size={16} />
+          <strong>App</strong>
+          <span className="small muted">Instant alerts on this device</span>
+        </div>
+        <div className="channel-card active">
+          <Mail size={16} />
+          <strong>Email</strong>
+          <span className="small muted">Receipts, task history, provider threads</span>
+        </div>
+        <div className="channel-card">
+          <Phone size={16} />
+          <strong>SMS</strong>
+          <span className="small muted">Approvals and time-sensitive nudges</span>
+        </div>
+      </div>
+      <label className="sms-field">
+        SMS number
+        <div className="inline-input-action">
+          <input
+            type="tel"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+            placeholder="(555) 123-4567"
+            disabled={loading || busy}
+          />
+          <button className="secondary" type="button" onClick={savePhone} disabled={loading || busy}>
+            {busy ? <Loader2 size={14} className="spinner" /> : "Save"}
+          </button>
+        </div>
+      </label>
+      {message && <div className="notice small">{message}</div>}
+    </div>
+  );
+}
+
 // ============================================================
 // SETTINGS TAB
 // ============================================================
@@ -4887,7 +5067,7 @@ function Settings({ autonomy }: { autonomy: AutonomyStatus | null }) {
         ) : (
           <>
             <p><strong>Free:</strong> dashboard, recall checks, savings recommendations, valuation, fuel log.</p>
-            <p><strong>Pro $9.99/mo or $99/yr:</strong> autonomous agent outreach, multi-vehicle, document upload + AI auto-fill, OBD dongle, SMS channel (coming soon).</p>
+            <p><strong>Pro $9.99/mo or $99/yr:</strong> agent outreach, multi-vehicle, AI auto-fill, OBD support, SMS approvals.</p>
             <div className="button-row">
               <button className="primary" onClick={() => checkout("monthly")}>Upgrade — $9.99/mo</button>
               <button className="secondary" onClick={() => checkout("annual")}>Upgrade — $99/yr (save ~17%)</button>
@@ -4922,6 +5102,8 @@ function Settings({ autonomy }: { autonomy: AutonomyStatus | null }) {
           Every important action is logged. External sharing requires approval that names who may be
           contacted and which fields may be shared. Phone numbers are never disclosed in outbound email.
         </p>
+
+        <CommunicationPreferencesPanel />
 
         <PushNotificationPanel />
 

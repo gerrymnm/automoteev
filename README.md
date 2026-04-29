@@ -11,6 +11,7 @@ Automoteev is a standalone AI vehicle ownership agent for existing vehicle owner
 - Payments: Stripe
 - VIN decode + recalls: NHTSA (vPIC + recallsByVehicle)
 - Vendor discovery: Google Places API (Places v1 searchText)
+- Vehicle valuation: MarketCheck, user-triggered only
 - Gas prices: U.S. EIA
 
 ## Repo layout
@@ -74,6 +75,9 @@ See `.env.example` for the authoritative list. Highlights:
 | `STRIPE_PRICE_ANNUAL` | Backend | Price ID for the $49/yr plan |
 | `VITE_STRIPE_PUBLISHABLE_KEY` | Frontend | Stripe dashboard |
 | `GOOGLE_MAPS_API_KEY` | Backend | Google Cloud → enable Places API (new) + Geocoding |
+| `MARKETCHECK_API_KEY` | Backend | MarketCheck key for “What is my car worth?” |
+| `MARKETCHECK_PRICE_TIER` | Backend | `base`, `premium`, or `premium_plus`; defaults to `base` |
+| `MARKETCHECK_DEALER_TYPE` | Backend | `independent` or `franchise`; defaults to `independent` |
 | `EIA_API_KEY` | Backend | api.eia.gov/register (free) |
 | `PII_ENCRYPTION_KEY` | Backend | `openssl rand -base64 32` — do NOT lose this |
 | `AUTONOMY_APPROVAL_THRESHOLD` | Backend | Default 3 — first N sends need approval |

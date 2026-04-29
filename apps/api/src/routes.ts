@@ -10,7 +10,7 @@ import { supabaseAdmin } from "./supabase.js";
 import { calculateCosts } from "./engines/cost.js";
 import { generateAlerts, statusFromAlerts } from "./engines/alerts.js";
 import { generateInsights, statusFromInsights } from "./engines/insights.js";
-import { estimateVehicleValue } from "./services/valuation.js";
+import { getVehicleValuation } from "./services/valuation.js";
 import {
   uploadDocument,
   extractDocument,
@@ -192,14 +192,6 @@ router.post("/api/onboarding", async (req, res) => {
     year: decoded.year
   });
 
-  // Estimate value up front so dashboard isn't blank.
-  const valuation = estimateVehicleValue({
-    year: decoded.year,
-    make: decoded.make,
-    model: decoded.model,
-    mileage: payload.mileage
-  });
-
   const { data: vehicle, error: vehicleError } = await req
     .db!.from("vehicles")
     .insert({
@@ -211,15 +203,12 @@ router.post("/api/onboarding", async (req, res) => {
       trim: decoded.trim,
       mileage: payload.mileage,
       ownership_type: payload.ownership_type,
-      estimated_value_cents:
-        valuation
-          ? Math.round((valuation.market_value_low_cents + valuation.market_value_high_cents) / 2)
-          : null,
-      market_value_low_cents: valuation?.market_value_low_cents ?? null,
-      market_value_high_cents: valuation?.market_value_high_cents ?? null,
-      dealer_value_low_cents: valuation?.dealer_value_low_cents ?? null,
-      dealer_value_high_cents: valuation?.dealer_value_high_cents ?? null,
-      value_estimated_at: valuation ? new Date().toISOString() : null,
+      estimated_value_cents: null,
+      market_value_low_cents: null,
+      market_value_high_cents: null,
+      dealer_value_low_cents: null,
+      dealer_value_high_cents: null,
+      value_estimated_at: null,
       next_service_due_miles: maintenance.next_service_due_miles,
       recall_status: "unknown",
       overall_status: "action_recommended"
@@ -1631,19 +1620,22 @@ router.post("/api/jobs/:jobName/run", async (req, res) => {
 
 router.post("/api/vehicles/:id/value/refresh", async (req, res) => {
   const vehicleId = z.string().uuid().parse(req.params.id);
-  const vehicle = await one(
-    req.db!.from("vehicles").select("*").eq("id", vehicleId)
-  );
+  const [vehicle, profile] = await Promise.all([
+    one(req.db!.from("vehicles").select("*").eq("id", vehicleId)),
+    one(req.db!.from("profiles").select("zip_code").eq("id", req.user!.id))
+  ]);
   if (!vehicle) return res.status(404).json({ error: "Vehicle not found" });
 
-  const valuation = estimateVehicleValue({
-    year: vehicle.year,
-    make: vehicle.make,
-    model: vehicle.model,
-    mileage: vehicle.mileage
-  });
-  if (!valuation) {
-    return res.status(422).json({ error: "Cannot estimate value without year/make/model." });
+  let valuation;
+  try {
+    valuation = await getVehicleValuation({
+      vin: vehicle.vin,
+      mileage: vehicle.mileage,
+      zipCode: (profile as any)?.zip_code ?? null
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Vehicle valuation failed.";
+    return res.status(message.includes("configured") ? 503 : 422).json({ error: message });
   }
 
   await req
@@ -1664,7 +1656,7 @@ router.post("/api/vehicles/:id/value/refresh", async (req, res) => {
     userId: req.user!.id,
     vehicleId,
     eventType: "value_refreshed",
-    summary: "Vehicle value estimate refreshed"
+    summary: "Vehicle value checked with MarketCheck"
   });
 
   return res.json({ valuation });
