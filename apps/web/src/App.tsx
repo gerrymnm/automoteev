@@ -1252,6 +1252,12 @@ function Home({
         </div>
       </div>
 
+      <VehicleValueCard
+        dashboard={dashboard}
+        vehicleId={vehicleId}
+        onRefresh={onRefresh}
+      />
+
       {/* ---------- Secondary improvements (collapsed by default) ---------- */}
       {secondary.length > 0 && (
         <details className="secondary-improvements">
@@ -1293,6 +1299,70 @@ function Home({
 
       {/* ---------- Documents on this vehicle (per-VIN folders view) ----- */}
       <VehicleDocumentsPanel vehicleId={vehicleId} refreshKey={docsRefreshKey} />
+    </section>
+  );
+}
+
+function VehicleValueCard({
+  dashboard,
+  vehicleId,
+  onRefresh
+}: {
+  dashboard: Dashboard;
+  vehicleId: string;
+  onRefresh: () => void;
+}) {
+  const [valueBusy, setValueBusy] = useState(false);
+  const [valueError, setValueError] = useState<string | null>(null);
+
+  async function checkVehicleValue() {
+    setValueBusy(true);
+    setValueError(null);
+    try {
+      await api(`/api/vehicles/${vehicleId}/value/refresh`, { method: "POST" });
+      await Promise.resolve(onRefresh());
+    } catch (err) {
+      setValueError(err instanceof Error ? err.message : "Could not check vehicle value.");
+    } finally {
+      setValueBusy(false);
+    }
+  }
+
+  return (
+    <section className="value-inquiry-card">
+      <div>
+        <span className="small muted">Vehicle value</span>
+        <h3>What is my car worth?</h3>
+        {dashboard.valuation ? (
+          <p>
+            <strong>{moneyRange(dashboard.valuation.market_value_low_cents, dashboard.valuation.market_value_high_cents)}</strong>
+            <span className="small muted">
+              {" "}market range
+              {dashboard.valuation.estimated_at
+                ? ` · checked ${new Date(dashboard.valuation.estimated_at).toLocaleDateString()}`
+                : ""}
+            </span>
+          </p>
+        ) : (
+          <p className="small muted">
+            Tap once and Automoteev will check current market pricing for this VIN.
+          </p>
+        )}
+        {dashboard.valuation && (
+          <p className="small muted">
+            Estimated dealer offer:{" "}
+            {moneyRange(dashboard.valuation.dealer_value_low_cents, dashboard.valuation.dealer_value_high_cents)}
+          </p>
+        )}
+        {valueError && <p className="error small">{valueError}</p>}
+      </div>
+      <button className="primary value-check-button" type="button" onClick={checkVehicleValue} disabled={valueBusy}>
+        {valueBusy ? (
+          <><Loader2 size={16} className="spinner" /> Checking</>
+        ) : (
+          <><DollarSign size={16} /> {dashboard.valuation ? "Update value" : "Check value"}</>
+        )}
+      </button>
     </section>
   );
 }
@@ -1763,41 +1833,7 @@ function Status({
           />
         )}
 
-        <section className="value-inquiry-card">
-          <div>
-            <span className="small muted">Vehicle value</span>
-            <h3>What is my car worth?</h3>
-            {dashboard.valuation ? (
-              <p>
-                <strong>{moneyRange(dashboard.valuation.market_value_low_cents, dashboard.valuation.market_value_high_cents)}</strong>
-                <span className="small muted">
-                  {" "}market range
-                  {dashboard.valuation.estimated_at
-                    ? ` · checked ${new Date(dashboard.valuation.estimated_at).toLocaleDateString()}`
-                    : ""}
-                </span>
-              </p>
-            ) : (
-              <p className="small muted">
-                Tap once and Automoteev will check current market pricing for this VIN.
-              </p>
-            )}
-            {dashboard.valuation && (
-              <p className="small muted">
-                Estimated dealer offer:{" "}
-                {moneyRange(dashboard.valuation.dealer_value_low_cents, dashboard.valuation.dealer_value_high_cents)}
-              </p>
-            )}
-            {valueError && <p className="error small">{valueError}</p>}
-          </div>
-          <button className="primary value-check-button" type="button" onClick={checkVehicleValue} disabled={valueBusy}>
-            {valueBusy ? (
-              <><Loader2 size={16} className="spinner" /> Checking</>
-            ) : (
-              <><DollarSign size={16} /> {dashboard.valuation ? "Update value" : "Check value"}</>
-            )}
-          </button>
-        </section>
+        <VehicleValueCard dashboard={dashboard} vehicleId={vehicleId} onRefresh={onRefresh} />
 
         <div className="metric-grid">
           <Metric label="Monthly cost" value={money(dashboard.cost_profile?.total_monthly_cost_cents)} />
