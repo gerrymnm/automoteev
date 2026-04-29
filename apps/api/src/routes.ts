@@ -1591,6 +1591,58 @@ router.put("/api/notification-preferences", async (req, res) => {
   });
 });
 
+router.post("/api/sms/test", async (req, res) => {
+  const [prefsResult, piiResult] = await Promise.all([
+    req
+      .db!.from("user_notification_preferences")
+      .select("sms_enabled")
+      .eq("user_id", req.user!.id)
+      .maybeSingle(),
+    req
+      .db!.from("user_pii")
+      .select("phone_encrypted")
+      .eq("user_id", req.user!.id)
+      .maybeSingle()
+  ]);
+  if (prefsResult.error) return res.status(400).json({ error: prefsResult.error.message });
+  if (piiResult.error) return res.status(400).json({ error: piiResult.error.message });
+  if (!prefsResult.data?.sms_enabled) {
+    return res.status(422).json({ error: "Turn on SMS before sending a test." });
+  }
+
+  const phone = piiResult.data?.phone_encrypted
+    ? decryptField(piiResult.data.phone_encrypted)
+    : null;
+  const normalizedPhone = normalizePhoneForSms(phone);
+  if (!normalizedPhone) {
+    return res.status(422).json({ error: "Add a valid SMS number before sending a test." });
+  }
+
+  const result = await sendSms({
+    userId: req.user!.id,
+    toPhone: normalizedPhone,
+    body: "Automoteev test SMS. Your approval alerts are ready."
+  });
+
+  await audit({
+    userId: req.user!.id,
+    eventType: "sms_test_sent",
+    summary:
+      result.status === "sent"
+        ? "Test SMS sent"
+        : `Test SMS ${result.status}`,
+    metadata: { status: result.status, reason: result.reason ?? null }
+  });
+
+  if (result.status === "failed") {
+    return res.status(502).json({ error: result.reason ?? "SMS send failed." });
+  }
+  if (result.status === "skipped") {
+    return res.status(503).json({ error: result.reason ?? "SMS skipped." });
+  }
+  return res.json({ sent: true, provider_message_id: result.messageId ?? null });
+});
+
 // ---------- Onboarding prompts (nudge system) ----------
 
 router.get("/api/onboarding/prompts", async (req, res) => {

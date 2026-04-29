@@ -5067,6 +5067,19 @@ function CommunicationPreferencesPanel() {
     }
   }
 
+  async function sendTestSms() {
+    setBusy(true);
+    setMessage(null);
+    try {
+      await api("/api/sms/test", { method: "POST" });
+      setMessage("Test SMS sent.");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Could not send test SMS.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="communication-panel">
       <h2>How Automoteev reaches you</h2>
@@ -5123,6 +5136,16 @@ function CommunicationPreferencesPanel() {
           {phone.trim() && !phoneValid && <span className="small muted"> Save to validate this number.</span>}
         </span>
       </label>
+      <div className="button-row">
+        <button
+          className="ghost"
+          type="button"
+          onClick={sendTestSms}
+          disabled={loading || busy || !smsEnabled}
+        >
+          {busy ? <Loader2 size={14} className="spinner" /> : <Send size={14} />} Send test SMS
+        </button>
+      </div>
       {message && <div className="notice small">{message}</div>}
     </div>
   );
