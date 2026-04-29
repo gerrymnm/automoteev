@@ -147,7 +147,7 @@ export function App() {
         ) : (
           <Routes>
             {/* Public marketing + auth */}
-            <Route path="/" element={<RedirectIfAuth><LandingPage /></RedirectIfAuth>} />
+            <Route path="/" element={<LandingPage />} />
             <Route path="/signin" element={<RedirectIfAuth><SignInPage /></RedirectIfAuth>} />
             <Route path="/signup" element={<RedirectIfAuth><SignUpPage /></RedirectIfAuth>} />
             <Route path="/privacy" element={<PrivacyPage />} />
@@ -891,6 +891,28 @@ function Product({ session }: { session: Session }) {
   if (!initialLoaded) {
     return <Shell><div className="panel"><Loader2 size={16} className="spinner" /> Loading your vehicle…</div></Shell>;
   }
+  if (error && !vehicles.length) {
+    return (
+      <Shell>
+        <section className="panel narrow">
+          <AlertTriangle size={22} />
+          <h1>We could not load your garage</h1>
+          <p className="muted">
+            Your account is signed in, but Automoteev could not fetch your vehicle data. This is usually a connection or deployment configuration issue, not a signal to set up a new vehicle.
+          </p>
+          <div className="button-row">
+            <button className="primary" type="button" onClick={() => void refresh()}>
+              <Clock3 size={16} /> Try again
+            </button>
+            <button className="secondary" type="button" onClick={() => supabase.auth.signOut()}>
+              <LogOut size={16} /> Sign out
+            </button>
+          </div>
+          <div className="error">{error}</div>
+        </section>
+      </Shell>
+    );
+  }
   if (!vehicles.length) {
     return <Shell><Onboarding onDone={refresh} email={session.user.email ?? ""} /></Shell>;
   }
@@ -1055,8 +1077,8 @@ function Onboarding({ onDone, email }: { onDone: () => void; email: string }) {
     <form className="panel onboarding" onSubmit={submit}>
       <h1>Set up your vehicle</h1>
       <p className="muted">
-        Just the basics for now. After this, you can snap a photo of your insurance dec page
-        or loan statement and Automoteev will fill in the details automatically.
+        Just the basics for now. After this, you can type policy or loan details,
+        snap a screenshot, or connect accounts when bank linking is ready.
       </p>
 
       <h3 className="section-head">Who you are</h3>
