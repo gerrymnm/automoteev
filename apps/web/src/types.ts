@@ -260,6 +260,22 @@ export interface SubscriptionStatus {
   } | null;
 }
 
+export interface PlaidStatus {
+  plaid: {
+    configured: boolean;
+    env: "sandbox" | "development" | "production";
+    products: string[];
+    country_codes: string[];
+  };
+  items: Array<{
+    id: string;
+    institution_name: string | null;
+    status: string;
+    last_synced_at: string | null;
+    created_at: string;
+  }>;
+}
+
 export type DocumentCategory =
   | "insurance"
   | "loan"

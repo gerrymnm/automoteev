@@ -72,6 +72,11 @@ See `.env.example` for the authoritative list. Highlights:
 | `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | Backend | Twilio SMS credentials |
 | `TWILIO_MESSAGING_SERVICE_SID` | Backend | Preferred SMS sender configuration |
 | `TWILIO_FROM_NUMBER` | Backend | Optional fallback if not using Messaging Service |
+| `PLAID_CLIENT_ID` / `PLAID_SECRET` | Backend | Plaid dashboard credentials |
+| `PLAID_ENV` | Backend | `sandbox`, `development`, or `production`; start with `sandbox` |
+| `PLAID_PRODUCTS` | Backend | Comma-separated products; v1 uses `transactions` |
+| `PLAID_REDIRECT_URI` | Backend | OAuth redirect, e.g. `https://automoteev.com/app` |
+| `PLAID_WEBHOOK_URL` | Backend | Optional API webhook URL for Plaid transaction updates |
 | `STRIPE_SECRET_KEY` | Backend | Stripe dashboard |
 | `STRIPE_WEBHOOK_SECRET` | Backend | Created when you add the webhook endpoint in Stripe |
 | `STRIPE_PRICE_MONTHLY` | Backend | Price ID for the $4.99/mo plan |

@@ -55,6 +55,17 @@ import {
   sendSms,
   taskApprovalSmsBody
 } from "./services/sms.js";
+import {
+  createPlaidLinkToken,
+  exchangePlaidPublicToken,
+  getPlaidAccounts,
+  getPlaidConfigStatus,
+  getPlaidInstitution,
+  getPlaidItem,
+  syncPlaidTransactions,
+  type PlaidAccount,
+  type PlaidTransaction
+} from "./services/plaid.js";
 import { getGasPrice, getMaintenanceCost } from "./services/market.js";
 import { assignAgentEmailLocal, composeAgentAddress } from "./services/alias.js";
 import {
@@ -1641,6 +1652,127 @@ router.post("/api/sms/test", async (req, res) => {
     return res.status(503).json({ error: result.reason ?? "SMS skipped." });
   }
   return res.json({ sent: true, provider_message_id: result.messageId ?? null });
+});
+
+// ---------- Plaid bank connection + Transactions Sync ----------
+
+router.get("/api/plaid/status", async (req, res) => {
+  const { data, error } = await req
+    .db!.from("plaid_items")
+    .select("id, institution_name, status, last_synced_at, created_at")
+    .eq("user_id", req.user!.id)
+    .order("created_at", { ascending: false });
+  if (error) return res.status(400).json({ error: error.message });
+  return res.json({
+    plaid: getPlaidConfigStatus(),
+    items: data ?? []
+  });
+});
+
+router.post("/api/plaid/link-token", async (req, res) => {
+  const result = await createPlaidLinkToken({
+    userId: req.user!.id,
+    userEmail: req.user!.email ?? null
+  });
+  return res.json(result);
+});
+
+router.post("/api/plaid/exchange", async (req, res) => {
+  const body = z.object({ public_token: z.string().min(1) }).parse(req.body);
+  const exchange = await exchangePlaidPublicToken(body.public_token);
+  const item = await getPlaidItem(exchange.access_token);
+  const institution = await getPlaidInstitution(item.item.institution_id);
+
+  const { data: plaidItem, error } = await req
+    .db!.from("plaid_items")
+    .upsert(
+      {
+        user_id: req.user!.id,
+        plaid_item_id: exchange.item_id,
+        access_token_encrypted: encryptField(exchange.access_token),
+        institution_id: item.item.institution_id,
+        institution_name: institution?.institution.name ?? null,
+        products: item.item.products ?? [],
+        status: "active",
+        error_code: null,
+        error_message: null
+      },
+      { onConflict: "plaid_item_id" }
+    )
+    .select()
+    .single();
+  if (error) return res.status(400).json({ error: error.message });
+
+  const accounts = await importPlaidAccounts({
+    userId: req.user!.id,
+    plaidItemId: plaidItem.id,
+    accessToken: exchange.access_token
+  });
+
+  await audit({
+    userId: req.user!.id,
+    eventType: "plaid_item_connected",
+    summary: "Bank account connected with Plaid",
+    metadata: {
+      plaid_item_id: exchange.item_id,
+      institution_name: plaidItem.institution_name,
+      account_count: accounts.length
+    }
+  });
+
+  return res.status(201).json({ item: redactPlaidItem(plaidItem), accounts });
+});
+
+router.post("/api/plaid/items/:id/sync", async (req, res) => {
+  const plaidItemId = z.string().uuid().parse(req.params.id);
+  const item = await one(
+    req.db!.from("plaid_items").select("*").eq("id", plaidItemId).eq("user_id", req.user!.id)
+  );
+  if (!item) return res.status(404).json({ error: "Plaid item not found." });
+  const accessToken = decryptField((item as any).access_token_encrypted);
+  if (!accessToken) return res.status(500).json({ error: "Plaid access token could not be decrypted." });
+
+  const result = await syncPlaidTransactions({
+    accessToken,
+    cursor: (item as any).transactions_cursor ?? null
+  });
+  await upsertPlaidTransactions({
+    userId: req.user!.id,
+    plaidItemId,
+    added: result.added,
+    modified: result.modified,
+    removed: result.removed
+  });
+
+  await req
+    .db!.from("plaid_items")
+    .update({
+      transactions_cursor: result.next_cursor,
+      last_synced_at: new Date().toISOString(),
+      status: "active",
+      error_code: null,
+      error_message: null
+    })
+    .eq("id", plaidItemId)
+    .eq("user_id", req.user!.id);
+
+  await audit({
+    userId: req.user!.id,
+    eventType: "plaid_transactions_synced",
+    summary: "Plaid transactions synced",
+    metadata: {
+      item_id: plaidItemId,
+      added: result.added.length,
+      modified: result.modified.length,
+      removed: result.removed.length
+    }
+  });
+
+  return res.json({
+    added: result.added.length,
+    modified: result.modified.length,
+    removed: result.removed.length
+  });
 });
 
 // ---------- Onboarding prompts (nudge system) ----------
@@ -3402,6 +3534,123 @@ async function one<T>(
   const result = await query;
   if (Array.isArray(result.data)) return result.data[0] ?? null;
   return result.data ?? null;
+}
+
+async function importPlaidAccounts(params: {
+  userId: string;
+  plaidItemId: string;
+  accessToken: string;
+}) {
+  const result = await getPlaidAccounts(params.accessToken);
+  const rows = result.accounts.map((account) => plaidAccountRow({
+    userId: params.userId,
+    plaidItemId: params.plaidItemId,
+    account
+  }));
+  if (!rows.length) return [];
+  const { data, error } = await supabaseAdmin
+    .from("plaid_accounts")
+    .upsert(rows, { onConflict: "plaid_account_id" })
+    .select("id, name, official_name, type, subtype, mask");
+  if (error) throw new Error(error.message);
+  return data ?? [];
+}
+
+function plaidAccountRow(params: {
+  userId: string;
+  plaidItemId: string;
+  account: PlaidAccount;
+}) {
+  return {
+    user_id: params.userId,
+    plaid_item_id: params.plaidItemId,
+    plaid_account_id: params.account.account_id,
+    name: params.account.name,
+    official_name: params.account.official_name,
+    type: params.account.type,
+    subtype: params.account.subtype,
+    mask: params.account.mask,
+    current_balance_cents: moneyToCents(params.account.balances.current),
+    available_balance_cents: moneyToCents(params.account.balances.available),
+    iso_currency_code: params.account.balances.iso_currency_code,
+    raw: params.account
+  };
+}
+
+async function upsertPlaidTransactions(params: {
+  userId: string;
+  plaidItemId: string;
+  added: PlaidTransaction[];
+  modified: PlaidTransaction[];
+  removed: { transaction_id: string }[];
+}) {
+  const transactions = [...params.added, ...params.modified];
+  if (transactions.length) {
+    const accountIds = Array.from(new Set(transactions.map((t) => t.account_id)));
+    const { data: accounts } = await supabaseAdmin
+      .from("plaid_accounts")
+      .select("id, plaid_account_id")
+      .in("plaid_account_id", accountIds);
+    const accountMap = new Map(
+      (accounts ?? []).map((a: any) => [a.plaid_account_id as string, a.id as string])
+    );
+    const rows = transactions.map((transaction) =>
+      plaidTransactionRow({
+        userId: params.userId,
+        plaidItemId: params.plaidItemId,
+        plaidAccountId: accountMap.get(transaction.account_id) ?? null,
+        transaction
+      })
+    );
+    const { error } = await supabaseAdmin
+      .from("plaid_transactions")
+      .upsert(rows, { onConflict: "plaid_transaction_id" });
+    if (error) throw new Error(error.message);
+  }
+
+  if (params.removed.length) {
+    const ids = params.removed.map((r) => r.transaction_id);
+    const { error } = await supabaseAdmin
+      .from("plaid_transactions")
+      .update({ removed_at: new Date().toISOString() })
+      .in("plaid_transaction_id", ids)
+      .eq("user_id", params.userId);
+    if (error) throw new Error(error.message);
+  }
+}
+
+function plaidTransactionRow(params: {
+  userId: string;
+  plaidItemId: string;
+  plaidAccountId: string | null;
+  transaction: PlaidTransaction;
+}) {
+  return {
+    user_id: params.userId,
+    plaid_item_id: params.plaidItemId,
+    plaid_account_id: params.plaidAccountId,
+    plaid_transaction_id: params.transaction.transaction_id,
+    name: params.transaction.name,
+    merchant_name: params.transaction.merchant_name,
+    amount_cents: moneyToCents(params.transaction.amount) ?? 0,
+    iso_currency_code: params.transaction.iso_currency_code,
+    date: params.transaction.date,
+    authorized_date: params.transaction.authorized_date,
+    category: params.transaction.category,
+    payment_channel: params.transaction.payment_channel,
+    pending: params.transaction.pending,
+    removed_at: null,
+    raw: params.transaction
+  };
+}
+
+function moneyToCents(value: number | null | undefined) {
+  return value == null ? null : Math.round(value * 100);
+}
+
+function redactPlaidItem(item: any) {
+  const { access_token_encrypted: _accessToken, ...safe } = item;
+  return safe;
 }
 
 router.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {

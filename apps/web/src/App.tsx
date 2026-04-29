@@ -44,6 +44,7 @@ import type {
   Insight,
   MaintenanceItem,
   PendingAction,
+  PlaidStatus,
   PlannedAttachment,
   Provider,
   RecallRecord,
@@ -3069,6 +3070,18 @@ function DocumentDropZone({
   const insuranceInputRef = useRef<HTMLInputElement>(null);
   const loanInputRef = useRef<HTMLInputElement>(null);
   const dlInputRef = useRef<HTMLInputElement>(null);
+  const [plaidStatus, setPlaidStatus] = useState<PlaidStatus | null>(null);
+  const [plaidBusy, setPlaidBusy] = useState(false);
+
+  function refreshPlaidStatus() {
+    api<PlaidStatus>("/api/plaid/status")
+      .then(setPlaidStatus)
+      .catch(() => undefined);
+  }
+
+  useEffect(() => {
+    refreshPlaidStatus();
+  }, []);
 
   async function uploadAndExtract(
     file: File,
@@ -3150,6 +3163,51 @@ function DocumentDropZone({
     }
   }
 
+  async function connectPlaid() {
+    if (!window.Plaid) {
+      setError("Plaid Link did not load. Refresh the page and try again.");
+      return;
+    }
+    setPlaidBusy(true);
+    setError(null);
+    try {
+      const { link_token } = await api<{ link_token: string }>("/api/plaid/link-token", {
+        method: "POST"
+      });
+      const handler = window.Plaid.create({
+        token: link_token,
+        onSuccess: async (publicToken) => {
+          try {
+            const exchange = await api<{
+              item: { id: string; institution_name: string | null };
+              accounts: Array<{ id: string }>;
+            }>("/api/plaid/exchange", {
+              method: "POST",
+              body: JSON.stringify({ public_token: publicToken })
+            });
+            await api(`/api/plaid/items/${exchange.item.id}/sync`, { method: "POST" });
+            refreshPlaidStatus();
+            onComplete();
+          } catch (err) {
+            setError(err instanceof Error ? err.message : "Could not finish bank connection.");
+          } finally {
+            setPlaidBusy(false);
+          }
+        },
+        onExit: () => {
+          setPlaidBusy(false);
+        }
+      });
+      handler.open();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not start bank connection.");
+      setPlaidBusy(false);
+    }
+  }
+
+  const plaidConnectedCount = plaidStatus?.items.length ?? 0;
+  const plaidConfigured = plaidStatus?.plaid.configured ?? false;
+
   return (
     <div className="sub-panel intake-panel">
       <div className="intake-head">
@@ -3169,10 +3227,26 @@ function DocumentDropZone({
           <button type="button" className="intake-choice secondary" onClick={() => onOpenForm("loan")}>
             <DollarSign size={16} /> Type loan
           </button>
-          <button type="button" className="intake-choice ghost" disabled title="Plaid connection is next">
-            <Lock size={16} /> Connect bank soon
+          <button
+            type="button"
+            className="intake-choice ghost"
+            onClick={connectPlaid}
+            disabled={plaidBusy || !plaidConfigured}
+            title={plaidConfigured ? "Connect with Plaid" : "Plaid is not configured yet"}
+          >
+            {plaidBusy ? <Loader2 size={16} className="spinner" /> : <Lock size={16} />}
+            {plaidConnectedCount > 0 ? "Connect another bank" : plaidConfigured ? "Connect bank" : "Connect bank soon"}
           </button>
         </div>
+      )}
+
+      {plaidConnectedCount > 0 && (
+        <p className="small muted">
+          Connected:{" "}
+          {plaidStatus!.items
+            .map((item) => item.institution_name ?? "Bank")
+            .join(", ")}
+        </p>
       )}
 
       <p className="small muted intake-upload-label">

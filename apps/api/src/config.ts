@@ -29,6 +29,15 @@ const envSchema = z.object({
   TWILIO_MESSAGING_SERVICE_SID: z.string().optional(),
   TWILIO_FROM_NUMBER: z.string().optional(),
 
+  // Plaid
+  PLAID_CLIENT_ID: z.string().optional(),
+  PLAID_SECRET: z.string().optional(),
+  PLAID_ENV: z.enum(["sandbox", "development", "production"]).default("sandbox"),
+  PLAID_PRODUCTS: z.string().default("transactions"),
+  PLAID_COUNTRY_CODES: z.string().default("US"),
+  PLAID_REDIRECT_URI: z.string().url().optional(),
+  PLAID_WEBHOOK_URL: z.string().url().optional(),
+
   // Stripe
   STRIPE_SECRET_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),

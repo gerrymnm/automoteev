@@ -168,6 +168,62 @@ create table public.sms_messages (
   created_at timestamptz not null default now()
 );
 
+create table public.plaid_items (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  plaid_item_id text not null unique,
+  access_token_encrypted text not null,
+  institution_id text,
+  institution_name text,
+  products text[] not null default '{}',
+  transactions_cursor text,
+  status text not null default 'active' check (status in ('active', 'error', 'disconnected')),
+  last_synced_at timestamptz,
+  error_code text,
+  error_message text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table public.plaid_accounts (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  plaid_item_id uuid not null references public.plaid_items(id) on delete cascade,
+  plaid_account_id text not null unique,
+  name text not null,
+  official_name text,
+  type text not null,
+  subtype text,
+  mask text,
+  current_balance_cents int,
+  available_balance_cents int,
+  iso_currency_code text,
+  raw jsonb not null default '{}',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table public.plaid_transactions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  plaid_item_id uuid not null references public.plaid_items(id) on delete cascade,
+  plaid_account_id uuid references public.plaid_accounts(id) on delete set null,
+  plaid_transaction_id text not null unique,
+  name text not null,
+  merchant_name text,
+  amount_cents int not null,
+  iso_currency_code text,
+  date date not null,
+  authorized_date date,
+  category text[],
+  payment_channel text,
+  pending boolean not null default false,
+  removed_at timestamptz,
+  raw jsonb not null default '{}',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create table public.task_audit_logs (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -206,6 +262,10 @@ create index on public.task_audit_logs(user_id, task_id);
 create index on public.task_emails(user_id, task_id);
 create index on public.sms_messages(user_id, created_at desc);
 create index on public.sms_messages(task_id, created_at desc);
+create index on public.plaid_items(user_id);
+create index on public.plaid_accounts(user_id);
+create index on public.plaid_transactions(user_id, date desc);
+create index on public.plaid_transactions(user_id, merchant_name);
 
 do $$
 declare
@@ -223,6 +283,9 @@ begin
     'task_emails',
     'user_notification_preferences',
     'sms_messages',
+    'plaid_items',
+    'plaid_accounts',
+    'plaid_transactions',
     'task_audit_logs',
     'vehicle_events',
     'documents'
@@ -251,6 +314,9 @@ create policy "task_emails_owner_all" on public.task_emails for all using (auth.
 create policy "notification_preferences_owner_all" on public.user_notification_preferences for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 create policy "sms_messages_owner_select" on public.sms_messages for select using (auth.uid() = user_id);
 create policy "sms_messages_owner_insert" on public.sms_messages for insert with check (auth.uid() = user_id);
+create policy "plaid_items_owner_all" on public.plaid_items for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+create policy "plaid_accounts_owner_all" on public.plaid_accounts for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+create policy "plaid_transactions_owner_all" on public.plaid_transactions for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 create policy "task_audit_logs_owner_select" on public.task_audit_logs for select using (auth.uid() = user_id);
 create policy "task_audit_logs_owner_insert" on public.task_audit_logs for insert with check (auth.uid() = user_id);
 create policy "vehicle_events_owner_all" on public.vehicle_events for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
@@ -264,3 +330,6 @@ create trigger insurance_accounts_updated_at before update on public.insurance_a
 create trigger providers_updated_at before update on public.providers for each row execute function public.set_updated_at();
 create trigger vehicle_tasks_updated_at before update on public.vehicle_tasks for each row execute function public.set_updated_at();
 create trigger notification_preferences_updated_at before update on public.user_notification_preferences for each row execute function public.set_updated_at();
+create trigger plaid_items_updated_at before update on public.plaid_items for each row execute function public.set_updated_at();
+create trigger plaid_accounts_updated_at before update on public.plaid_accounts for each row execute function public.set_updated_at();
+create trigger plaid_transactions_updated_at before update on public.plaid_transactions for each row execute function public.set_updated_at();
