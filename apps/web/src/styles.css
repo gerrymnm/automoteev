@@ -685,6 +685,9 @@ label.checkbox-row a {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
 }
+.sms-toggle-row {
+  margin-top: 10px;
+}
 
 .extraction-preview {
   margin-top: 12px; padding: 14px;

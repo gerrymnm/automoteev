@@ -142,6 +142,32 @@ create table public.task_emails (
   created_at timestamptz not null default now()
 );
 
+create table public.user_notification_preferences (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  sms_enabled boolean not null default false,
+  email_enabled boolean not null default true,
+  push_enabled boolean not null default true,
+  quiet_hours_start time,
+  quiet_hours_end time,
+  timezone text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table public.sms_messages (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  task_id uuid references public.vehicle_tasks(id) on delete set null,
+  to_phone text,
+  body_text text not null,
+  direction text not null default 'outbound' check (direction in ('outbound', 'inbound')),
+  status text not null check (status in ('sent', 'queued', 'delivered', 'failed', 'skipped', 'received')),
+  provider text not null default 'twilio',
+  provider_message_id text,
+  error_message text,
+  created_at timestamptz not null default now()
+);
+
 create table public.task_audit_logs (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -178,6 +204,8 @@ create index on public.vehicle_alerts(user_id, is_resolved);
 create index on public.vehicle_tasks(user_id, status);
 create index on public.task_audit_logs(user_id, task_id);
 create index on public.task_emails(user_id, task_id);
+create index on public.sms_messages(user_id, created_at desc);
+create index on public.sms_messages(task_id, created_at desc);
 
 do $$
 declare
@@ -193,6 +221,8 @@ begin
     'providers',
     'vehicle_tasks',
     'task_emails',
+    'user_notification_preferences',
+    'sms_messages',
     'task_audit_logs',
     'vehicle_events',
     'documents'
@@ -218,6 +248,9 @@ create policy "vehicle_alerts_owner_all" on public.vehicle_alerts for all using 
 create policy "providers_owner_all" on public.providers for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 create policy "vehicle_tasks_owner_all" on public.vehicle_tasks for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 create policy "task_emails_owner_all" on public.task_emails for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+create policy "notification_preferences_owner_all" on public.user_notification_preferences for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+create policy "sms_messages_owner_select" on public.sms_messages for select using (auth.uid() = user_id);
+create policy "sms_messages_owner_insert" on public.sms_messages for insert with check (auth.uid() = user_id);
 create policy "task_audit_logs_owner_select" on public.task_audit_logs for select using (auth.uid() = user_id);
 create policy "task_audit_logs_owner_insert" on public.task_audit_logs for insert with check (auth.uid() = user_id);
 create policy "vehicle_events_owner_all" on public.vehicle_events for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
@@ -230,3 +263,4 @@ create trigger loan_lease_accounts_updated_at before update on public.loan_lease
 create trigger insurance_accounts_updated_at before update on public.insurance_accounts for each row execute function public.set_updated_at();
 create trigger providers_updated_at before update on public.providers for each row execute function public.set_updated_at();
 create trigger vehicle_tasks_updated_at before update on public.vehicle_tasks for each row execute function public.set_updated_at();
+create trigger notification_preferences_updated_at before update on public.user_notification_preferences for each row execute function public.set_updated_at();

@@ -49,6 +49,12 @@ import {
 } from "./services/business-directory.js";
 import { pickProviderEmailForDept, taskTypeToContactDept } from "./services/contacts.js";
 import { subscribePush, unsubscribePush, sendPushToUser } from "./services/push.js";
+import {
+  getSmsConfigStatus,
+  normalizePhoneForSms,
+  sendSms,
+  taskApprovalSmsBody
+} from "./services/sms.js";
 import { getGasPrice, getMaintenanceCost } from "./services/market.js";
 import { assignAgentEmailLocal, composeAgentAddress } from "./services/alias.js";
 import {
@@ -75,6 +81,7 @@ import {
   emailSendSchema,
   insuranceUpdateSchema,
   loanLeaseUpdateSchema,
+  notificationPreferencesSchema,
   piiUpdateSchema,
   taskCommandSchema,
   taskCreateSchema
@@ -644,6 +651,67 @@ router.post("/api/tasks/:id/approval", async (req, res) => {
       : "Owner cancelled task"
   });
   return res.json({ task: data });
+});
+
+router.post("/api/tasks/:id/sms/approval-nudge", async (req, res) => {
+  const taskId = z.string().uuid().parse(req.params.id);
+  const [task, prefsResult, piiResult] = await Promise.all([
+    one(req.db!.from("vehicle_tasks").select("*").eq("id", taskId)),
+    req
+      .db!.from("user_notification_preferences")
+      .select("sms_enabled")
+      .eq("user_id", req.user!.id)
+      .maybeSingle(),
+    req
+      .db!.from("user_pii")
+      .select("phone_encrypted")
+      .eq("user_id", req.user!.id)
+      .maybeSingle()
+  ]);
+  if (!task) return res.status(404).json({ error: "Task not found" });
+  if (prefsResult.error) return res.status(400).json({ error: prefsResult.error.message });
+  if (piiResult.error) return res.status(400).json({ error: piiResult.error.message });
+  if (!prefsResult.data?.sms_enabled) {
+    return res.status(422).json({ error: "SMS is not enabled for this account." });
+  }
+
+  const phone = piiResult.data?.phone_encrypted
+    ? decryptField(piiResult.data.phone_encrypted)
+    : null;
+  const normalizedPhone = normalizePhoneForSms(phone);
+  if (!normalizedPhone) {
+    return res.status(422).json({ error: "Add a valid SMS number before sending SMS nudges." });
+  }
+
+  const result = await sendSms({
+    userId: req.user!.id,
+    taskId,
+    toPhone: normalizedPhone,
+    body: taskApprovalSmsBody({
+      taskTitle: task.title,
+      appUrl: env.APP_URL
+    })
+  });
+
+  await audit({
+    userId: req.user!.id,
+    taskId,
+    vehicleId: task.vehicle_id,
+    eventType: "sms_approval_nudge_sent",
+    summary:
+      result.status === "sent"
+        ? "SMS approval nudge sent"
+        : `SMS approval nudge ${result.status}`,
+    metadata: { status: result.status, reason: result.reason ?? null }
+  });
+
+  if (result.status === "failed") {
+    return res.status(502).json({ error: result.reason ?? "SMS send failed." });
+  }
+  if (result.status === "skipped") {
+    return res.status(503).json({ error: result.reason ?? "SMS skipped." });
+  }
+  return res.json({ sent: true, provider_message_id: result.messageId ?? null });
 });
 
 router.post("/api/tasks/:id/emails", async (req, res) => {
@@ -1440,6 +1508,87 @@ router.put("/api/pii", async (req, res) => {
   });
 
   return res.json({ pii: { user_id: data.user_id, dl_collected_at: data.dl_collected_at } });
+});
+
+// ---------- Notification preferences (app/email/SMS) ----------
+
+router.get("/api/notification-preferences", async (req, res) => {
+  const [prefsResult, piiResult] = await Promise.all([
+    req
+      .db!.from("user_notification_preferences")
+      .select("*")
+      .eq("user_id", req.user!.id)
+      .maybeSingle(),
+    req
+      .db!.from("user_pii")
+      .select("phone_encrypted")
+      .eq("user_id", req.user!.id)
+      .maybeSingle()
+  ]);
+  if (prefsResult.error) return res.status(400).json({ error: prefsResult.error.message });
+  if (piiResult.error) return res.status(400).json({ error: piiResult.error.message });
+
+  const phone = piiResult.data?.phone_encrypted
+    ? decryptField(piiResult.data.phone_encrypted)
+    : null;
+  const normalizedPhone = normalizePhoneForSms(phone);
+  return res.json({
+    preferences: prefsResult.data ?? {
+      sms_enabled: false,
+      email_enabled: true,
+      push_enabled: true
+    },
+    phone,
+    phone_valid_for_sms: Boolean(normalizedPhone),
+    sms: getSmsConfigStatus()
+  });
+});
+
+router.put("/api/notification-preferences", async (req, res) => {
+  const payload = notificationPreferencesSchema.parse(req.body);
+
+  if (payload.phone !== undefined) {
+    await req
+      .db!.from("user_pii")
+      .upsert(
+        {
+          user_id: req.user!.id,
+          phone_encrypted: payload.phone ? encryptField(payload.phone) : null
+        },
+        { onConflict: "user_id" }
+      );
+    if (payload.phone) await markFieldCompleted(req.user!.id, "phone");
+  }
+
+  const row: Record<string, unknown> = { user_id: req.user!.id };
+  if (payload.sms_enabled !== undefined) row.sms_enabled = payload.sms_enabled;
+  if (payload.email_enabled !== undefined) row.email_enabled = payload.email_enabled;
+  if (payload.push_enabled !== undefined) row.push_enabled = payload.push_enabled;
+
+  const { data, error } = await req
+    .db!.from("user_notification_preferences")
+    .upsert(row, { onConflict: "user_id" })
+    .select()
+    .single();
+  if (error) return res.status(400).json({ error: error.message });
+
+  await audit({
+    userId: req.user!.id,
+    eventType: "notification_preferences_updated",
+    summary: "Notification preferences updated",
+    metadata: {
+      sms_enabled: data.sms_enabled,
+      email_enabled: data.email_enabled,
+      push_enabled: data.push_enabled
+    }
+  });
+
+  const phone = payload.phone !== undefined ? payload.phone : null;
+  return res.json({
+    preferences: data,
+    phone_valid_for_sms: payload.phone === undefined ? null : Boolean(normalizePhoneForSms(phone)),
+    sms: getSmsConfigStatus()
+  });
 });
 
 // ---------- Onboarding prompts (nudge system) ----------

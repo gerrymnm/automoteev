@@ -69,6 +69,9 @@ See `.env.example` for the authoritative list. Highlights:
 | `RESEND_API_KEY` | Backend | resend.com → API Keys |
 | `RESEND_INBOUND_WEBHOOK_SECRET` | Backend | Generated when you create the inbound webhook in Resend |
 | `RESEND_EVENTS_WEBHOOK_SECRET` | Backend | Generated when you create the events webhook in Resend |
+| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | Backend | Twilio SMS credentials |
+| `TWILIO_MESSAGING_SERVICE_SID` | Backend | Preferred SMS sender configuration |
+| `TWILIO_FROM_NUMBER` | Backend | Optional fallback if not using Messaging Service |
 | `STRIPE_SECRET_KEY` | Backend | Stripe dashboard |
 | `STRIPE_WEBHOOK_SECRET` | Backend | Created when you add the webhook endpoint in Stripe |
 | `STRIPE_PRICE_MONTHLY` | Backend | Price ID for the $4.99/mo plan |

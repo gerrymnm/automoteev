@@ -5009,6 +5009,9 @@ function PushNotificationPanel() {
 
 function CommunicationPreferencesPanel() {
   const [phone, setPhone] = useState("");
+  const [smsEnabled, setSmsEnabled] = useState(false);
+  const [smsConfigured, setSmsConfigured] = useState(false);
+  const [phoneValid, setPhoneValid] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -5016,27 +5019,49 @@ function CommunicationPreferencesPanel() {
   useEffect(() => {
     void (async () => {
       try {
-        const result = await api<{ pii: { phone: string | null } | null }>("/api/pii");
-        setPhone(result.pii?.phone ?? "");
+        const result = await api<{
+          preferences: { sms_enabled: boolean; email_enabled: boolean; push_enabled: boolean };
+          phone: string | null;
+          phone_valid_for_sms: boolean;
+          sms: { configured: boolean };
+        }>("/api/notification-preferences");
+        setPhone(result.phone ?? "");
+        setSmsEnabled(Boolean(result.preferences.sms_enabled));
+        setSmsConfigured(result.sms.configured);
+        setPhoneValid(result.phone_valid_for_sms);
       } catch {
-        // Keep the field editable even if PII hasn't been created yet.
+        setMessage("Could not load notification preferences.");
       } finally {
         setLoading(false);
       }
     })();
   }, []);
 
-  async function savePhone() {
+  async function savePreferences(nextSmsEnabled = smsEnabled) {
     setBusy(true);
     setMessage(null);
     try {
-      await api("/api/pii", {
+      const result = await api<{
+        preferences: { sms_enabled: boolean };
+        phone_valid_for_sms: boolean | null;
+      }>("/api/notification-preferences", {
         method: "PUT",
-        body: JSON.stringify({ phone: phone.trim() || null })
+        body: JSON.stringify({
+          phone: phone.trim() || null,
+          sms_enabled: nextSmsEnabled
+        })
       });
-      setMessage(phone.trim() ? "SMS number saved." : "SMS number removed.");
+      setSmsEnabled(result.preferences.sms_enabled);
+      setPhoneValid(Boolean(result.phone_valid_for_sms));
+      setMessage(
+        result.preferences.sms_enabled
+          ? "SMS alerts are on for approvals and important updates."
+          : phone.trim()
+          ? "SMS number saved. SMS alerts are off."
+          : "SMS number removed."
+      );
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Could not save SMS number.");
+      setMessage(err instanceof Error ? err.message : "Could not save SMS preferences.");
     } finally {
       setBusy(false);
     }
@@ -5059,10 +5084,12 @@ function CommunicationPreferencesPanel() {
           <strong>Email</strong>
           <span className="small muted">Receipts, task history, provider threads</span>
         </div>
-        <div className="channel-card">
+        <div className={`channel-card ${smsEnabled ? "active" : ""}`}>
           <Phone size={16} />
           <strong>SMS</strong>
-          <span className="small muted">Approvals and time-sensitive nudges</span>
+          <span className="small muted">
+            {smsConfigured ? "Approvals and time-sensitive nudges" : "Server setup needed"}
+          </span>
         </div>
       </div>
       <label className="sms-field">
@@ -5075,10 +5102,26 @@ function CommunicationPreferencesPanel() {
             placeholder="(555) 123-4567"
             disabled={loading || busy}
           />
-          <button className="secondary" type="button" onClick={savePhone} disabled={loading || busy}>
+          <button className="secondary" type="button" onClick={() => savePreferences()} disabled={loading || busy}>
             {busy ? <Loader2 size={14} className="spinner" /> : "Save"}
           </button>
         </div>
+      </label>
+      <label className="checkbox-row sms-toggle-row">
+        <input
+          type="checkbox"
+          checked={smsEnabled}
+          disabled={loading || busy || !phone.trim()}
+          onChange={(e) => {
+            setSmsEnabled(e.target.checked);
+            void savePreferences(e.target.checked);
+          }}
+        />
+        <span>
+          Send SMS for approvals and important updates
+          {!phone.trim() && <span className="small muted"> Add a phone number first.</span>}
+          {phone.trim() && !phoneValid && <span className="small muted"> Save to validate this number.</span>}
+        </span>
       </label>
       {message && <div className="notice small">{message}</div>}
     </div>

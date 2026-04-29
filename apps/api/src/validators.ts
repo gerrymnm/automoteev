@@ -119,3 +119,10 @@ export const providerSearchSchema = z.object({
 export const onboardingPromptDismissSchema = z.object({
   field_name: z.string().min(1)
 });
+
+export const notificationPreferencesSchema = z.object({
+  sms_enabled: z.boolean().optional(),
+  email_enabled: z.boolean().optional(),
+  push_enabled: z.boolean().optional(),
+  phone: z.string().nullable().optional()
+});
