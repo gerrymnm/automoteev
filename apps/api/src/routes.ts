@@ -3156,6 +3156,25 @@ router.post("/api/tasks/:id/dispatch", async (req, res) => {
     );
   }
 
+  // Record that the user just shopped insurance so the "shop insurance" insight
+  // doesn't re-fire on the next Home / dashboard load. The insight engine reads
+  // last_shopped_at via daysSinceLastInsuranceShop and suppresses for ~30d. We
+  // hook this on dispatch (not on quote-completion) because dispatching IS the
+  // user's act of shopping — the engine should stop nagging the moment quotes
+  // go out, regardless of whether carriers reply. RLS-scoped req.db enforces
+  // ownership; if the row isn't visible, the update affects 0 rows safely.
+  if (
+    sent > 0 &&
+    (task as any).task_type === "insurance_quote" &&
+    (task as any).vehicle_id
+  ) {
+    await req
+      .db!.from("insurance_accounts")
+      .update({ last_shopped_at: new Date().toISOString() })
+      .eq("user_id", req.user!.id)
+      .eq("vehicle_id", (task as any).vehicle_id);
+  }
+
   await audit({
     userId: req.user!.id,
     taskId,
