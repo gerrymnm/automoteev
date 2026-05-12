@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   Bell,
   BellOff,
+  Banknote,
   Camera,
   CheckCircle2,
   ChevronRight,
@@ -13,6 +14,7 @@ import {
   Edit3,
   ExternalLink,
   FileImage,
+  Fuel,
   Info,
   Loader2,
   Lock,
@@ -36,6 +38,8 @@ import { isSupabaseConfigured, supabase } from "./supabase";
 import type {
   AgentWorkingItem,
   AutonomyStatus,
+  ClassificationsListResponse,
+  ConfirmClassificationResponse,
   CostPeriod,
   Dashboard,
   DispatchPayload,
@@ -58,6 +62,8 @@ import type {
   ThreadItem,
   ThreadEmailData,
   ThreadEventData,
+  TransactionClassClass,
+  TransactionClassification,
   UploadedDocument,
   Vehicle
 } from "./types";
@@ -1315,6 +1321,13 @@ function Home({
 
       {/* ---------- Renewals on file (DL, insurance, warranties, etc.) ---- */}
       <RenewalsPanel
+        vehicleId={vehicleId}
+        refreshKey={docsRefreshKey}
+        onChange={onRefresh}
+      />
+
+      {/* ---------- Plaid: detected vehicle charges awaiting your call ---- */}
+      <PlaidClassificationsPanel
         vehicleId={vehicleId}
         refreshKey={docsRefreshKey}
         onChange={onRefresh}
@@ -2892,6 +2905,277 @@ function RenewalFormModal({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ============================================================
+// Plaid Classifications Panel — detected vehicle charges to confirm/dismiss
+// ============================================================
+//
+// Lists pending classifications from /api/plaid/classifications (status=pending)
+// and lets the user act on each one with two buttons:
+//   - Confirm  -> POST /api/plaid/classifications/:id/confirm
+//                 (mints fuel_entries for fuel class; logs vehicle_events for
+//                 service/parts; metadata-only for insurance/lender/subscription)
+//   - Dismiss  -> POST /api/plaid/classifications/:id/dismiss
+//
+// Hidden entirely when there are zero pending rows so it doesn't clutter
+// Home for users who haven't connected a bank yet (or who've already
+// processed everything the classifier surfaced).
+//
+// Driven off the same refreshKey as RenewalsPanel so document uploads,
+// dispatches, etc. trigger a re-poll — keeps the list fresh after the
+// user's action elsewhere bumps state.
+
+function iconForClass(klass: TransactionClassClass, size = 16) {
+  switch (klass) {
+    case "fuel":
+      return <Fuel size={size} />;
+    case "insurance":
+      return <ShieldCheck size={size} />;
+    case "lender":
+      return <Banknote size={size} />;
+    case "service":
+      return <Wrench size={size} />;
+    case "parts":
+      return <Wrench size={size} />;
+    case "registration":
+      return <FileImage size={size} />;
+    case "parking_toll":
+      return <MapPin size={size} />;
+    case "subscription":
+      return <DollarSign size={size} />;
+    default:
+      return <Sparkles size={size} />;
+  }
+}
+
+function labelForClass(klass: TransactionClassClass): string {
+  switch (klass) {
+    case "fuel":
+      return "Fuel";
+    case "insurance":
+      return "Insurance";
+    case "lender":
+      return "Auto loan / lease";
+    case "service":
+      return "Service";
+    case "parts":
+      return "Auto parts";
+    case "registration":
+      return "DMV / registration";
+    case "parking_toll":
+      return "Parking / toll";
+    case "subscription":
+      return "Vehicle subscription";
+    default:
+      return klass;
+  }
+}
+
+function confirmCtaLabelForClass(klass: TransactionClassClass): string {
+  switch (klass) {
+    case "fuel":
+      return "Log as fuel";
+    case "service":
+      return "Log as service";
+    case "parts":
+      return "Log as parts";
+    case "insurance":
+      return "Yes, insurance";
+    case "lender":
+      return "Yes, my loan";
+    case "subscription":
+      return "Yes, recurring";
+    case "registration":
+      return "Yes, DMV";
+    case "parking_toll":
+      return "Yes, parking / toll";
+    default:
+      return "Confirm";
+  }
+}
+
+function PlaidClassificationsPanel({
+  vehicleId,
+  refreshKey,
+  onChange
+}: {
+  vehicleId: string;
+  refreshKey?: number;
+  onChange: () => void;
+}) {
+  const [classifications, setClassifications] = useState<
+    TransactionClassification[] | null
+  >(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  /** Tracks the in-flight action keyed by classification id + verb so we can
+   *  show a per-row spinner without freezing the whole panel. */
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  /** Bumped after every successful mutation so the list re-fetches without
+   *  forcing a parent re-render. */
+  const [bumpKey, setBumpKey] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setError(null);
+    api<ClassificationsListResponse>(
+      "/api/plaid/classifications?status=pending&limit=50"
+    )
+      .then((data) => {
+        if (!alive) return;
+        setClassifications(data.classifications);
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setError(err instanceof Error ? err.message : "Could not load classifications");
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [vehicleId, refreshKey, bumpKey]);
+
+  function refreshLocal() {
+    setBumpKey((k) => k + 1);
+    onChange();
+  }
+
+  async function confirmRow(c: TransactionClassification) {
+    const key = `${c.id}:confirm`;
+    setBusyKey(key);
+    setError(null);
+    try {
+      // For fuel we could prompt for mileage/gallons before confirming, but
+      // the minimum viable path is: confirm with no overrides → backend
+      // mints a fuel_entry using the txn date + amount. User can later
+      // enrich it from the fuel log if they want.
+      await api<ConfirmClassificationResponse>(
+        `/api/plaid/classifications/${c.id}/confirm`,
+        { method: "POST", body: JSON.stringify({}) }
+      );
+      refreshLocal();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not confirm");
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
+  async function dismissRow(c: TransactionClassification) {
+    const key = `${c.id}:dismiss`;
+    setBusyKey(key);
+    setError(null);
+    try {
+      await api(`/api/plaid/classifications/${c.id}/dismiss`, {
+        method: "POST"
+      });
+      refreshLocal();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not dismiss");
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
+  // Hide the panel entirely when there's nothing to act on. We don't render
+  // an empty state because the panel is purely transactional — a user who
+  // has zero pending classifications has nothing to do here, and the
+  // intake panel above already covers "connect a bank".
+  if (loading) return null;
+  if (!classifications || classifications.length === 0) return null;
+
+  return (
+    <div className="sub-panel plaid-classifications-panel">
+      <div className="renewals-head">
+        <div>
+          <h3>Detected charges</h3>
+          <p className="small muted">
+            From your connected bank. Confirm anything that's car-related so
+            Automoteev can log it; dismiss anything that isn't.
+          </p>
+        </div>
+      </div>
+
+      {error && <div className="error small">{error}</div>}
+
+      <ul className="renewals-list">
+        {classifications.map((c) => {
+          const txn = c.transaction;
+          const amountStr =
+            txn.amount_cents != null
+              ? new Intl.NumberFormat("en-US", {
+                  style: "currency",
+                  currency: "USD",
+                  maximumFractionDigits: 2
+                }).format(txn.amount_cents / 100)
+              : "—";
+          const merchant = txn.merchant_name ?? txn.name ?? "Unknown merchant";
+          const dateStr = txn.date ? new Date(txn.date + "T00:00:00").toLocaleDateString() : "";
+          const confirming = busyKey === `${c.id}:confirm`;
+          const dismissing = busyKey === `${c.id}:dismiss`;
+          const busy = confirming || dismissing;
+          return (
+            <li key={c.id} className="renewal-row">
+              <div className="renewal-summary" style={{ cursor: "default" }}>
+                <span className="renewal-icon">{iconForClass(c.class, 16)}</span>
+                <span className="renewal-label">
+                  <strong>{merchant}</strong>
+                  <span className="small muted"> · {amountStr}</span>
+                  {dateStr && <span className="small muted"> · {dateStr}</span>}
+                  <span
+                    className="renewal-badge renewal-badge-future"
+                    style={{ marginLeft: 8 }}
+                  >
+                    {labelForClass(c.class)}
+                  </span>
+                  {c.is_recurring && (
+                    <span className="renewal-auto-renew small"> · recurring</span>
+                  )}
+                </span>
+              </div>
+              {c.reason && (
+                <p className="small muted" style={{ padding: "0 12px 8px 38px" }}>
+                  {c.reason}
+                </p>
+              )}
+              <div className="renewal-actions">
+                <button
+                  type="button"
+                  className="primary small"
+                  onClick={() => confirmRow(c)}
+                  disabled={busy}
+                >
+                  {confirming ? (
+                    <Loader2 size={12} className="spinner" />
+                  ) : (
+                    <CheckCircle2 size={12} />
+                  )}{" "}
+                  {confirmCtaLabelForClass(c.class)}
+                </button>
+                <button
+                  type="button"
+                  className="ghost small"
+                  onClick={() => dismissRow(c)}
+                  disabled={busy}
+                >
+                  {dismissing ? (
+                    <Loader2 size={12} className="spinner" />
+                  ) : (
+                    <X size={12} />
+                  )}{" "}
+                  Not a car charge
+                </button>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }

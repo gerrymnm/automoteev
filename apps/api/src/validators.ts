@@ -76,7 +76,20 @@ export const piiUpdateSchema = z.object({
   city: z.string().nullable().optional(),
   state: z.string().length(2).nullable().optional(),
   dl_number: z.string().nullable().optional(),
-  dl_state: z.string().length(2).nullable().optional()
+  dl_state: z.string().length(2).nullable().optional(),
+  // DL date fields are stored as YYYY-MM-DD strings; Postgres date column
+  // round-trips them as-is. Explicit null clears the column; undefined =
+  // "no change" per the upsert pattern used in PUT /api/pii.
+  dl_expires_at: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "dl_expires_at must be YYYY-MM-DD")
+    .nullable()
+    .optional(),
+  dl_issued_date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "dl_issued_date must be YYYY-MM-DD")
+    .nullable()
+    .optional()
 });
 
 export const taskCommandSchema = z.object({

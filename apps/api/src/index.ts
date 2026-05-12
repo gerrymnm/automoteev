@@ -7,6 +7,7 @@ import { webhooks } from "./webhooks.js";
 import { mcpRouter } from "./mcp/server.js";
 import { startDailyRecallsJob } from "./jobs/daily-recalls.js";
 import { startDailyRenewalRemindersJob } from "./jobs/daily-renewal-reminders.js";
+import { startDailyPlaidSyncJob } from "./jobs/daily-plaid-sync.js";
 
 const app = express();
 
@@ -39,6 +40,13 @@ app.use(
   "/webhooks/email/events",
   express.raw({ type: "*/*", limit: "1mb" })
 );
+app.use(
+  "/webhooks/plaid",
+  // Plaid sends JSON; keep the raw bytes so future JWT-based signature
+  // verification can read what was signed. The handler in webhooks.ts
+  // parses the JSON itself.
+  express.raw({ type: "*/*", limit: "1mb" })
+);
 
 app.use(webhooks);
 
@@ -60,4 +68,9 @@ app.listen(env.PORT, () => {
   // day thresholds before each renewable item's expiration. Offset 30s
   // after daily-recalls (so 90s after boot) to avoid event-loop contention.
   startDailyRenewalRemindersJob();
+  // Daily Plaid sync — backstop in case webhooks are missed (or unavailable
+  // in sandbox/dev). Offset 30s after daily-renewal-reminders (120s after
+  // boot). Plaid /transactions/sync is incremental via cursor so re-running
+  // costs nothing when there's nothing new.
+  startDailyPlaidSyncJob();
 });

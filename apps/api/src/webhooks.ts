@@ -9,6 +9,9 @@ import { recordVerifiedContact } from "./services/business-directory.js";
 import { sendPushToUser } from "./services/push.js";
 import { classifyReply } from "./services/reply-classifier.js";
 import { uploadDocument, extractDocument, type DocumentKind } from "./services/documents.js";
+import { syncPlaidTransactions } from "./services/plaid.js";
+import { decryptField } from "./security/encryption.js";
+import { classifyTransactionsForUser } from "./services/transaction-classifier.js";
 
 export const webhooks = Router();
 
@@ -515,6 +518,228 @@ webhooks.post("/webhooks/email/inbound", async (req: Request, res: Response) => 
 
   return res.json({ received: true });
 });
+
+/**
+ * Plaid webhook.
+ *
+ * Plaid fires this on transaction updates, item errors, and account changes.
+ * We process the codes that matter for refresh semantics and ignore the rest.
+ *
+ * Verification: Plaid signs webhooks with a JWT in the `plaid-verification`
+ * header. Full verification requires fetching the public key from Plaid's
+ * /webhook_verification_key/get endpoint and validating the ES256 signature.
+ * Until that's wired up we accept payloads as-is — the worst case is we
+ * trigger an extra Plaid sync from a forged payload, which costs nothing
+ * because the access token is server-side only and the sync is idempotent.
+ *
+ * Event types we act on:
+ *   SYNC_UPDATES_AVAILABLE - new/modified/removed transactions ready to fetch
+ *   INITIAL_UPDATE         - first batch ready (we did initial sync at exchange,
+ *                            but re-sync to pick up backfill that wasn't ready)
+ *   HISTORICAL_UPDATE      - older transactions ready
+ *   DEFAULT_UPDATE         - changes within the existing window
+ *   TRANSACTIONS_REMOVED   - explicitly removed transactions
+ *
+ * Event types we acknowledge but skip:
+ *   ITEM_ERROR / PENDING_EXPIRATION / etc — surfaced in plaid_items.status
+ *   via the next sync attempt; no immediate action needed.
+ */
+webhooks.post(
+  "/webhooks/plaid",
+  // Plaid sends application/json. Mounted with raw body in index.ts so the
+  // verification step (when added) can read the exact bytes — we parse it
+  // here.
+  async (req: Request, res: Response) => {
+    let payload: Record<string, any>;
+    try {
+      const raw = req.body;
+      if (Buffer.isBuffer(raw)) {
+        payload = JSON.parse(raw.toString("utf8"));
+      } else if (typeof raw === "object" && raw !== null) {
+        payload = raw as Record<string, any>;
+      } else {
+        payload = {};
+      }
+    } catch (err) {
+      console.warn("[plaid] webhook body parse failed", err);
+      return res.status(400).json({ error: "invalid_json" });
+    }
+
+    const webhookType = payload.webhook_type as string | undefined;
+    const webhookCode = payload.webhook_code as string | undefined;
+    const plaidItemId = payload.item_id as string | undefined;
+
+    console.log(
+      `[plaid] webhook received: type=${webhookType ?? "?"} code=${webhookCode ?? "?"} item=${plaidItemId ?? "?"}`
+    );
+
+    // Acknowledge non-transactions events immediately; nothing to do.
+    if (!plaidItemId || webhookType !== "TRANSACTIONS") {
+      return res.json({ received: true, acted: false });
+    }
+
+    // Look up our internal item by Plaid's external item_id.
+    const { data: item, error: itemErr } = await supabaseAdmin
+      .from("plaid_items")
+      .select("id, user_id, access_token_encrypted, transactions_cursor, status")
+      .eq("plaid_item_id", plaidItemId)
+      .maybeSingle();
+    if (itemErr) {
+      console.error("[plaid] item lookup failed", itemErr);
+      return res.status(500).json({ error: "lookup_failed" });
+    }
+    if (!item) {
+      console.warn(`[plaid] unknown item_id ${plaidItemId} — ignoring`);
+      return res.status(202).json({ ignored: true, reason: "unknown_item" });
+    }
+    if ((item as any).status === "disconnected") {
+      return res.status(202).json({ ignored: true, reason: "disconnected" });
+    }
+
+    const codesThatTriggerSync = new Set([
+      "SYNC_UPDATES_AVAILABLE",
+      "INITIAL_UPDATE",
+      "HISTORICAL_UPDATE",
+      "DEFAULT_UPDATE",
+      "TRANSACTIONS_REMOVED"
+    ]);
+    if (!webhookCode || !codesThatTriggerSync.has(webhookCode)) {
+      return res.json({ received: true, acted: false, code: webhookCode });
+    }
+
+    // Decrypt the access token and run a sync. Failures are surfaced on the
+    // item's status column so the UI can show the user that their bank
+    // connection needs attention.
+    let accessToken: string | null;
+    try {
+      accessToken = decryptField((item as any).access_token_encrypted);
+    } catch (err) {
+      console.error("[plaid] access token decrypt failed", err);
+      accessToken = null;
+    }
+    if (!accessToken) {
+      await supabaseAdmin
+        .from("plaid_items")
+        .update({
+          status: "error",
+          error_code: "decrypt_failed",
+          error_message: "Could not decrypt access token"
+        })
+        .eq("id", (item as any).id);
+      return res.status(500).json({ error: "decrypt_failed" });
+    }
+
+    try {
+      const result = await syncPlaidTransactions({
+        accessToken,
+        cursor: (item as any).transactions_cursor ?? null
+      });
+
+      // Upsert the new transactions. We keep this inline rather than
+      // calling into routes.ts so the webhook doesn't depend on the
+      // Express router being constructed yet.
+      const transactions = [...result.added, ...result.modified];
+      const newPlaidIds: string[] = [];
+      if (transactions.length > 0) {
+        const accountIds = Array.from(new Set(transactions.map((t) => t.account_id)));
+        const { data: accounts } = await supabaseAdmin
+          .from("plaid_accounts")
+          .select("id, plaid_account_id")
+          .in("plaid_account_id", accountIds);
+        const accountMap = new Map<string, string>();
+        for (const a of (accounts ?? []) as Array<{ id: string; plaid_account_id: string }>) {
+          accountMap.set(a.plaid_account_id, a.id);
+        }
+        const rows = transactions.map((t) => ({
+          user_id: (item as any).user_id,
+          plaid_item_id: (item as any).id,
+          plaid_account_id: accountMap.get(t.account_id) ?? null,
+          plaid_transaction_id: t.transaction_id,
+          name: t.name,
+          merchant_name: t.merchant_name,
+          amount_cents: Math.round(t.amount * 100),
+          iso_currency_code: t.iso_currency_code,
+          date: t.date,
+          authorized_date: t.authorized_date,
+          category: t.category,
+          payment_channel: t.payment_channel,
+          pending: t.pending,
+          removed_at: null,
+          raw: t
+        }));
+        const { error: upErr } = await supabaseAdmin
+          .from("plaid_transactions")
+          .upsert(rows, { onConflict: "plaid_transaction_id" });
+        if (upErr) {
+          throw new Error(`upsert_failed: ${upErr.message}`);
+        }
+        newPlaidIds.push(...rows.map((r) => r.plaid_transaction_id));
+      }
+      if (result.removed.length > 0) {
+        const ids = result.removed.map((r) => r.transaction_id);
+        await supabaseAdmin
+          .from("plaid_transactions")
+          .update({ removed_at: new Date().toISOString() })
+          .in("plaid_transaction_id", ids)
+          .eq("user_id", (item as any).user_id);
+      }
+
+      await supabaseAdmin
+        .from("plaid_items")
+        .update({
+          transactions_cursor: result.next_cursor,
+          last_synced_at: new Date().toISOString(),
+          status: "active",
+          error_code: null,
+          error_message: null
+        })
+        .eq("id", (item as any).id);
+
+      // Classify the deltas so newly-imported vehicle-relevant charges show
+      // up on the Home Needs You stack within seconds of the webhook.
+      let classified = 0;
+      if (newPlaidIds.length > 0) {
+        const { data: ourRows } = await supabaseAdmin
+          .from("plaid_transactions")
+          .select("id")
+          .eq("user_id", (item as any).user_id)
+          .in("plaid_transaction_id", newPlaidIds);
+        const ourIds = ((ourRows ?? []) as Array<{ id: string }>).map((r) => r.id);
+        if (ourIds.length > 0) {
+          const out = await classifyTransactionsForUser({
+            userId: (item as any).user_id,
+            transactionIds: ourIds
+          });
+          classified = out.classified;
+        }
+      }
+
+      console.log(
+        `[plaid] webhook synced item ${(item as any).id}: added=${result.added.length} modified=${result.modified.length} removed=${result.removed.length} classified=${classified}`
+      );
+
+      return res.json({
+        received: true,
+        added: result.added.length,
+        modified: result.modified.length,
+        removed: result.removed.length,
+        classified
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "sync_failed";
+      console.error(`[plaid] webhook sync failed for item ${(item as any).id}`, err);
+      await supabaseAdmin
+        .from("plaid_items")
+        .update({
+          status: "error",
+          error_code: "webhook_sync_failed",
+          error_message: message.slice(0, 500)
+        })
+        .eq("id", (item as any).id);
+      return res.status(500).json({ error: "sync_failed", detail: message });
+    }
+  }
+);
 
 /**
  * Resend events webhook (delivered, bounced, spam, opened, etc).

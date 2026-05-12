@@ -66,6 +66,11 @@ import {
   type PlaidAccount,
   type PlaidTransaction
 } from "./services/plaid.js";
+import {
+  classifyTransactionsForUser,
+  reclassifyAllForUser,
+  type TransactionClass
+} from "./services/transaction-classifier.js";
 import { getGasPrice, getMaintenanceCost } from "./services/market.js";
 import { assignAgentEmailLocal, composeAgentAddress } from "./services/alias.js";
 import {
@@ -1479,7 +1484,9 @@ router.get("/api/pii", async (req, res) => {
           state: data.state,
           dl_number: decryptField(data.dl_number_encrypted) ?? null,
           dl_state: data.dl_state,
-          dl_collected_at: data.dl_collected_at
+          dl_collected_at: data.dl_collected_at,
+          dl_expires_at: data.dl_expires_at ?? null,
+          dl_issued_date: data.dl_issued_date ?? null
         }
       : null
   });
@@ -1500,6 +1507,10 @@ router.put("/api/pii", async (req, res) => {
     row.dl_collected_at = payload.dl_number ? new Date().toISOString() : null;
   }
   if (payload.dl_state !== undefined) row.dl_state = payload.dl_state;
+  // Structured DL date columns. Pass-through YYYY-MM-DD strings; Postgres
+  // date columns store them natively without timezone shenanigans.
+  if (payload.dl_expires_at !== undefined) row.dl_expires_at = payload.dl_expires_at;
+  if (payload.dl_issued_date !== undefined) row.dl_issued_date = payload.dl_issued_date;
 
   const { data, error } = await req
     .db!.from("user_pii")
@@ -1756,6 +1767,31 @@ router.post("/api/plaid/items/:id/sync", async (req, res) => {
     .eq("id", plaidItemId)
     .eq("user_id", req.user!.id);
 
+  // Run the classifier on the newly added/modified transactions so the
+  // Home Needs You stack reflects the freshest signals as soon as the
+  // sync completes. We scope by transactionIds rather than re-classifying
+  // everything — keeps cost bounded for users with thousands of rows.
+  let classified = 0;
+  const newPlaidIds = [
+    ...result.added.map((t) => t.transaction_id),
+    ...result.modified.map((t) => t.transaction_id)
+  ];
+  if (newPlaidIds.length > 0) {
+    const { data: ourRows } = await supabaseAdmin
+      .from("plaid_transactions")
+      .select("id")
+      .eq("user_id", req.user!.id)
+      .in("plaid_transaction_id", newPlaidIds);
+    const ourIds = ((ourRows ?? []) as Array<{ id: string }>).map((r) => r.id);
+    if (ourIds.length > 0) {
+      const out = await classifyTransactionsForUser({
+        userId: req.user!.id,
+        transactionIds: ourIds
+      });
+      classified = out.classified;
+    }
+  }
+
   await audit({
     userId: req.user!.id,
     eventType: "plaid_transactions_synced",
@@ -1764,15 +1800,329 @@ router.post("/api/plaid/items/:id/sync", async (req, res) => {
       item_id: plaidItemId,
       added: result.added.length,
       modified: result.modified.length,
-      removed: result.removed.length
+      removed: result.removed.length,
+      classified
     }
   });
 
   return res.json({
     added: result.added.length,
     modified: result.modified.length,
-    removed: result.removed.length
+    removed: result.removed.length,
+    classified
   });
+});
+
+// ---------- Plaid transaction classifications ----------
+//
+// The classifier (apps/api/src/services/transaction-classifier.ts) runs
+// automatically after every sync and writes one row per detected
+// vehicle-relevant transaction. These endpoints let the UI:
+//   - list the pending classifications (the Needs You stack on Home)
+//   - confirm a classification (and for fuel, mint a fuel_entries row
+//     with the amount/date pulled from the transaction)
+//   - dismiss a misclassification so we stop showing it
+//   - re-run the classifier (e.g. after the user adds their insurance
+//     carrier so the carrier-boost rules fire)
+
+/**
+ * List the user's classifications, optionally filtered. Default sort is
+ * newest-first by transaction date. The transaction is joined inline so
+ * the UI has merchant/amount/date without a second roundtrip.
+ *
+ * Query params:
+ *   ?status=pending|confirmed|dismissed|any   (default: pending)
+ *   ?class=fuel,insurance,...                  (CSV, optional)
+ *   ?limit=N                                   (default: 50, max 200)
+ */
+router.get("/api/plaid/classifications", async (req, res) => {
+  const status =
+    typeof req.query.status === "string"
+      ? req.query.status
+      : "pending";
+  const classesParam =
+    typeof req.query.class === "string" ? req.query.class : null;
+  const allowedClasses = new Set([
+    "fuel",
+    "insurance",
+    "lender",
+    "service",
+    "parts",
+    "registration",
+    "parking_toll",
+    "subscription"
+  ]);
+  const classes = classesParam
+    ? classesParam
+        .split(",")
+        .map((c) => c.trim())
+        .filter((c) => allowedClasses.has(c))
+    : null;
+  const limit = Math.max(
+    1,
+    Math.min(200, Number(req.query.limit ?? 50) || 50)
+  );
+
+  let query = req
+    .db!.from("plaid_transaction_classifications")
+    .select(
+      "id, plaid_transaction_id, vehicle_id, class, confidence, reason, matched_provider_name, is_recurring, confirmed_at, dismissed_at, fuel_entry_id, metadata, created_at, plaid_transactions(id, name, merchant_name, amount_cents, date, category)"
+    )
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (status === "pending") {
+    query = query.is("confirmed_at", null).is("dismissed_at", null);
+  } else if (status === "confirmed") {
+    query = query.not("confirmed_at", "is", null);
+  } else if (status === "dismissed") {
+    query = query.not("dismissed_at", "is", null);
+  }
+  if (classes && classes.length > 0) {
+    query = query.in("class", classes);
+  }
+
+  const { data, error } = await query;
+  if (error) return res.status(400).json({ error: error.message });
+
+  // Flatten the joined transaction onto each row so the UI doesn't have to
+  // dig through Supabase's nested representation.
+  const rows = ((data ?? []) as any[]).map((row) => {
+    const txn = (row.plaid_transactions ?? {}) as any;
+    return {
+      id: row.id,
+      plaid_transaction_id: row.plaid_transaction_id,
+      vehicle_id: row.vehicle_id,
+      class: row.class,
+      confidence: Number(row.confidence ?? 0),
+      reason: row.reason,
+      matched_provider_name: row.matched_provider_name,
+      is_recurring: Boolean(row.is_recurring),
+      confirmed_at: row.confirmed_at,
+      dismissed_at: row.dismissed_at,
+      fuel_entry_id: row.fuel_entry_id,
+      created_at: row.created_at,
+      transaction: {
+        id: txn.id ?? null,
+        name: txn.name ?? null,
+        merchant_name: txn.merchant_name ?? null,
+        amount_cents: txn.amount_cents ?? null,
+        date: txn.date ?? null,
+        category: txn.category ?? null
+      }
+    };
+  });
+
+  return res.json({ classifications: rows, total: rows.length });
+});
+
+/**
+ * Confirm a classification. Side-effects depend on the class:
+ *   fuel        — mints a fuel_entries row (entry_date = txn date,
+ *                 total_cents = txn amount) and stashes the fuel_entry_id
+ *                 on the classification so we can show "already logged"
+ *                 next time. Caller may pass override fields (mileage,
+ *                 gallons) to enrich the fuel entry.
+ *   insurance   — touches insurance_accounts.last_seen_charge_at via
+ *                 metadata (no schema change in this commit; tracked for
+ *                 a future renewal-detection insight).
+ *   lender      — same: metadata-only confirmation.
+ *   service     — inserts a vehicle_events row tagged service_charge.
+ *   parts       — same: vehicle_events tagged parts_purchase.
+ *   subscription— doesn't auto-create a renewable_item (we don't know
+ *                 the cadence yet); the UI nudges the user to add one.
+ *
+ * All branches write a task_audit_logs entry. Failures partway through
+ * still mark the row confirmed_at so the user doesn't keep seeing it.
+ */
+router.post("/api/plaid/classifications/:id/confirm", async (req, res) => {
+  const id = z.string().uuid().parse(req.params.id);
+  const schema = z
+    .object({
+      mileage: z.number().int().nonnegative().optional(),
+      gallons: z.number().nonnegative().optional(),
+      notes: z.string().max(500).optional(),
+      // Override vehicle_id (defaults to the classification's vehicle_id).
+      vehicle_id: z.string().uuid().optional()
+    })
+    .optional();
+  const payload = schema.parse(req.body ?? {}) ?? {};
+
+  // RLS-scoped read — user must own the classification.
+  const { data: row } = await req
+    .db!.from("plaid_transaction_classifications")
+    .select(
+      "id, vehicle_id, class, confirmed_at, dismissed_at, fuel_entry_id, plaid_transaction_id, plaid_transactions(id, name, merchant_name, amount_cents, date)"
+    )
+    .eq("id", id)
+    .maybeSingle();
+  if (!row) return res.status(404).json({ error: "Not found" });
+  if ((row as any).confirmed_at) {
+    return res.status(200).json({ ok: true, already_confirmed: true });
+  }
+  if ((row as any).dismissed_at) {
+    return res.status(409).json({ error: "Already dismissed — cannot confirm." });
+  }
+
+  const txn = ((row as any).plaid_transactions ?? {}) as {
+    id: string;
+    name: string;
+    merchant_name: string | null;
+    amount_cents: number;
+    date: string;
+  };
+  const klass = (row as any).class as string;
+  const vehicleId = payload.vehicle_id ?? (row as any).vehicle_id ?? null;
+
+  let fuelEntryId: string | null = (row as any).fuel_entry_id ?? null;
+  let sideEffectSummary = "";
+
+  if (klass === "fuel" && vehicleId && !fuelEntryId) {
+    const { data: entry, error: entryErr } = await req
+      .db!.from("fuel_entries")
+      .insert({
+        user_id: req.user!.id,
+        vehicle_id: vehicleId,
+        entry_date: txn.date,
+        total_cents: txn.amount_cents,
+        gallons: payload.gallons ?? null,
+        odometer_miles: payload.mileage ?? null,
+        notes:
+          payload.notes ??
+          `Auto-logged from Plaid charge: ${txn.merchant_name ?? txn.name}`
+      })
+      .select()
+      .single();
+    if (entryErr) {
+      return res.status(400).json({ error: entryErr.message });
+    }
+    fuelEntryId = (entry as any).id;
+    sideEffectSummary = `Logged ${(txn.amount_cents / 100).toFixed(2)} fuel entry on ${txn.date}`;
+  } else if (klass === "service" && vehicleId) {
+    await req.db!.from("vehicle_events").insert({
+      user_id: req.user!.id,
+      vehicle_id: vehicleId,
+      event_type: "service_charge",
+      summary: `Service charge: ${txn.merchant_name ?? txn.name} — ${(txn.amount_cents / 100).toFixed(2)}`,
+      metadata: {
+        source: "plaid_classification",
+        plaid_transaction_id: (row as any).plaid_transaction_id,
+        amount_cents: txn.amount_cents,
+        date: txn.date,
+        notes: payload.notes ?? null
+      }
+    });
+    sideEffectSummary = `Logged service charge`;
+  } else if (klass === "parts" && vehicleId) {
+    await req.db!.from("vehicle_events").insert({
+      user_id: req.user!.id,
+      vehicle_id: vehicleId,
+      event_type: "parts_purchase",
+      summary: `Parts purchase: ${txn.merchant_name ?? txn.name} — ${(txn.amount_cents / 100).toFixed(2)}`,
+      metadata: {
+        source: "plaid_classification",
+        plaid_transaction_id: (row as any).plaid_transaction_id,
+        amount_cents: txn.amount_cents,
+        date: txn.date
+      }
+    });
+    sideEffectSummary = `Logged parts purchase`;
+  } else if (klass === "insurance" || klass === "lender") {
+    // No side-effect today — just record the user's acknowledgment. The next
+    // commit will use these confirmations to detect premium changes and
+    // payment drift.
+    sideEffectSummary = `Acknowledged ${klass} charge`;
+  } else if (klass === "subscription" || klass === "registration" || klass === "parking_toll") {
+    sideEffectSummary = `Acknowledged ${klass.replace("_", " ")} charge`;
+  }
+
+  const { data: updated, error: updErr } = await req
+    .db!.from("plaid_transaction_classifications")
+    .update({
+      confirmed_at: new Date().toISOString(),
+      fuel_entry_id: fuelEntryId
+    })
+    .eq("id", id)
+    .select()
+    .single();
+  if (updErr) return res.status(400).json({ error: updErr.message });
+
+  await audit({
+    userId: req.user!.id,
+    vehicleId,
+    eventType: "plaid_classification_confirmed",
+    summary: `Confirmed Plaid ${klass} classification — ${txn.merchant_name ?? txn.name}`,
+    metadata: {
+      classification_id: id,
+      class: klass,
+      plaid_transaction_id: (row as any).plaid_transaction_id,
+      amount_cents: txn.amount_cents,
+      side_effect: sideEffectSummary,
+      fuel_entry_id: fuelEntryId
+    }
+  });
+
+  return res.json({
+    classification: updated,
+    fuel_entry_id: fuelEntryId,
+    side_effect: sideEffectSummary
+  });
+});
+
+/**
+ * Dismiss a classification ("no, this isn't a car charge"). Doesn't delete
+ * the row — we keep it so the classifier won't re-surface it next sync.
+ */
+router.post("/api/plaid/classifications/:id/dismiss", async (req, res) => {
+  const id = z.string().uuid().parse(req.params.id);
+  const { data: row } = await req
+    .db!.from("plaid_transaction_classifications")
+    .select("id, class, confirmed_at, dismissed_at, plaid_transaction_id")
+    .eq("id", id)
+    .maybeSingle();
+  if (!row) return res.status(404).json({ error: "Not found" });
+  if ((row as any).dismissed_at) {
+    return res.status(200).json({ ok: true, already_dismissed: true });
+  }
+  if ((row as any).confirmed_at) {
+    return res.status(409).json({ error: "Already confirmed — cannot dismiss." });
+  }
+
+  const { data: updated, error } = await req
+    .db!.from("plaid_transaction_classifications")
+    .update({ dismissed_at: new Date().toISOString() })
+    .eq("id", id)
+    .select()
+    .single();
+  if (error) return res.status(400).json({ error: error.message });
+
+  await audit({
+    userId: req.user!.id,
+    eventType: "plaid_classification_dismissed",
+    summary: `Dismissed Plaid ${(row as any).class} classification`,
+    metadata: {
+      classification_id: id,
+      plaid_transaction_id: (row as any).plaid_transaction_id
+    }
+  });
+
+  return res.json({ classification: updated });
+});
+
+/**
+ * Re-run the classifier across all of the user's transactions. Useful when
+ * they add an insurance carrier or lender so the carrier-/lender-boost
+ * rules pick up the new value and reclassify prior charges.
+ */
+router.post("/api/plaid/classifications/reclassify", async (req, res) => {
+  const result = await reclassifyAllForUser(req.user!.id);
+  await audit({
+    userId: req.user!.id,
+    eventType: "plaid_classifications_reclassified",
+    summary: `Reclassified ${result.scanned} transactions; ${result.classified} are vehicle-relevant`,
+    metadata: { ...result }
+  });
+  return res.json(result);
 });
 
 // ---------- Onboarding prompts (nudge system) ----------

@@ -378,6 +378,56 @@ export interface RenewalsListResponse {
   total: number;
 }
 
+export interface ClassificationsListResponse {
+  classifications: TransactionClassification[];
+  total: number;
+}
+
+// ============================================================================
+// Plaid transaction classifications
+// ============================================================================
+
+export type TransactionClassClass =
+  | "fuel"
+  | "insurance"
+  | "lender"
+  | "service"
+  | "parts"
+  | "registration"
+  | "parking_toll"
+  | "subscription";
+
+export interface TransactionClassification {
+  id: string;
+  plaid_transaction_id: string;
+  vehicle_id: string | null;
+  class: TransactionClassClass;
+  /** 0..1 — 1.0 means exact merchant match or user-context boost */
+  confidence: number;
+  reason: string | null;
+  matched_provider_name: string | null;
+  is_recurring: boolean;
+  confirmed_at: string | null;
+  dismissed_at: string | null;
+  fuel_entry_id: string | null;
+  created_at: string;
+  /** Joined Plaid transaction, flattened by the route handler. */
+  transaction: {
+    id: string | null;
+    name: string | null;
+    merchant_name: string | null;
+    amount_cents: number | null;
+    date: string | null;
+    category: string[] | null;
+  };
+}
+
+export interface ConfirmClassificationResponse {
+  classification: TransactionClassification;
+  fuel_entry_id: string | null;
+  side_effect: string;
+}
+
 export interface MCPConnection {
   id: string;
   client_name: string;

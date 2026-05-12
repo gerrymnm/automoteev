@@ -363,6 +363,23 @@ export async function applyExtractedDocument(params: {
       update.dl_state = data.dl_state;
       applied.push("dl_state");
     }
+    // Structured DL dates: the extraction prompt asks for YYYY-MM-DD.
+    // Validate the format here so a malformed value (rare model slip)
+    // doesn't blow up the upsert with a Postgres date parse error.
+    // Source of truth lives on user_pii now; renewable_items DL row is
+    // a downstream artifact synced via upsertRenewalFromDLExtraction below.
+    const isoDate = (v: unknown): string | null =>
+      typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+    const expiresAtIso = isoDate(data.expiration_date);
+    const issuedAtIso = isoDate(data.issued_date);
+    if (expiresAtIso) {
+      update.dl_expires_at = expiresAtIso;
+      applied.push("dl_expires_at");
+    }
+    if (issuedAtIso) {
+      update.dl_issued_date = issuedAtIso;
+      applied.push("dl_issued_date");
+    }
     if (Object.keys(update).length > 1) {
       await supabaseAdmin
         .from("user_pii")
